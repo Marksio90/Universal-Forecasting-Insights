@@ -1,15 +1,22 @@
+# =========================
+# Intelligent Predictor — runtime deps
+# Python 3.10–3.12 (sprawdzone)
+# =========================
+
 # Core
 streamlit==1.36.0
 python-dotenv==1.0.1
 pydantic==2.9.2
+packaging==24.1
 
 # Data Processing
 pandas==2.2.2
-numpy==2.0.1
+numpy==1.26.4              # stabilne dla sklearn 1.5 / shap / lightgbm na Py 3.10–3.12
+scipy==1.13.1              # zgodne z numpy 1.26 i sklearn 1.5
 openpyxl==3.1.5
 python-docx==1.1.2
 PyPDF2==3.0.1
-python-magic==0.4.27
+python-magic==0.4.27       # linux wymaga libmagic w systemie
 
 # AI & ML
 openai==1.46.0
@@ -19,16 +26,17 @@ lightgbm==4.4.0
 shap==0.46.0
 
 # Time Series
-prophet==1.1.5
+prophet==1.1.5             # wymaga cmdstan przy pierwszym uruchomieniu (auto-pobierze via cmdstanpy)
 statsmodels==0.14.3
 pmdarima==2.0.4
 
 # Visualization
 plotly==5.23.0
 altair==5.4.1
+kaleido==0.2.1             # export obrazów z Plotly w raportach
 
 # Database / Vector / Cache
-sqlalchemy==2.0.34
+SQLAlchemy==2.0.34
 chromadb==0.5.5
 redis==5.0.8
 
@@ -39,7 +47,7 @@ mlflow==2.15.1
 ydata-profiling==4.10.0
 
 # Utils
-pyyaml==6.0.2
+PyYAML==6.0.2
 loguru==0.7.2
-jinja2==3.1.4
+Jinja2==3.1.4
 joblib==1.4.2

@@ -1,32 +1,99 @@
+# ================================
+# Intelligent Predictor — CONFIG
+# ================================
+
 app:
   title: "Intelligent Predictor"
-  theme: "dark"
+  theme: "dark"                        # dark | light (styling / motywy wykresów)
+  locale: "pl_PL"
+  timezone: "Europe/Warsaw"
   max_file_size_mb: 400
   allow_formats: ["csv","xlsx","json","docx","pdf"]
   enable_vector_store: false
   enable_redis_cache: false
+  date_display_format: "YYYY-MM-DD"
+  # ścieżki / branding
+  assets_dir: "assets"
+  logo_path: "assets/images/logo.png"
+
+logging:
+  level: INFO                          # globalny poziom
+  console_level: INFO
+  file_level: DEBUG
+  rotation: "25 MB"
+  retention: "30 days"
+  serialize_json: true                 # dodatkowy plik JSONL
+  json_filename: "app.jsonl"
+  log_filename: "app.log"
+  backtrace: false
+  diagnose: false
+  enqueue: true                        # bezpieczne wątkowo/procesowo
+  memory_buffer: 5000                  # linie bufora do podglądu w UI
+
+database:
+  url: "sqlite:///data/app.db"         # SQLAlchemy
+  echo: false
+
+cache:
+  redis_url: ""                        # np. redis://localhost:6379/0
+  default_ttl_seconds: 3600
+
+vector_store:
+  backend: "chroma"                    # chroma | pinecone
+  chroma:
+    path: "data/vector"
+    collection: "ip_embeddings"
+  pinecone:
+    index: ""
+    environment: ""
+    namespace: "ip"
 
 ml:
   problem_detection_rows_min: 50
-  default_metric_regression: "rmse"
+  default_metric_regression: "rmse"    # używane w kartach/raporcie
   default_metric_classification: "f1_weighted"
   test_size: 0.2
   random_state: 42
   enable_shap: true
+  shap_sample_size: 2000               # max rekordów do SHAP
+  n_jobs: -1                           # wątki dla modeli wspierających
   max_training_minutes: 10
+  allow_categorical_encoding: true     # automatyczny encoding niskiej krotności
+  registry_autoprune: true             # czyszczenie sierot w rejestrze
 
 ts:
   horizon: 12
-  frequency_guess: "auto"
+  frequency_guess: "auto"              # auto | D | W | MS | Q | Y ...
   backtesting_folds: 3
   ts_metric_primary: "sMAPE"
+  extra_regressors: "auto"             # auto | [] (lista kolumn) | null
+  growth: "linear"                     # linear | logistic
+  outlier_clip: "iqr"                  # none | iqr | zscore
+  include_history: false
 
 ai:
+  provider: "openai"                   # openai | azure
   model: "gpt-4o-mini"
   temperature: 0.2
   max_tokens: 900
+  top_p: 1.0
+  system_prompt: "Jesteś seniorem Data Scientist i Analitykiem Biznesowym. Odpowiadasz zwięźle i konkretnie."
+  timeout_seconds: 60
 
 reports:
   include_eda_summary: true
   include_model_cards: true
   include_business_recommendations: true
+  plot_render: "cdn"                   # cdn | inline (dla Plotly w raportach)
+  template_path: "assets/templates/report_template.html"
+  exports_dir: "data/exports"
+
+feature_flags:
+  enable_anomaly_detection: true
+  enable_model_registry: true
+  enable_forecast_band: true
+  enable_openai_test_button: true
+
+security:
+  sanitize_html: true
+  allow_local_file_downloads: true

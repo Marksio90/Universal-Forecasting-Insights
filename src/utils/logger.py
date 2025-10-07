@@ -36,16 +36,12 @@ DEFAULTS = {
     "app_name": "intelligent-predictor",
     "backtrace": False,
     "diagnose": False,
-    "enqueue": True,         # bezpieczne wątkowo/procesowo
-    "memory_buffer": 2000,   # logi w pamięci do UI
+    "enqueue": True,
+    "memory_buffer": 2000,
 }
 
-# ======================================================
-# POBIERANIE KONFIGURACJI (config.yaml / ENV)
-# ======================================================
 def _load_config() -> dict:
     cfg = dict(DEFAULTS)
-    # config.yaml
     cfg_path = PROJECT_ROOT / "config.yaml"
     if yaml and cfg_path.exists():
         try:
@@ -55,7 +51,6 @@ def _load_config() -> dict:
                 cfg.update({k: sec.get(k, cfg[k]) for k in DEFAULTS})
         except Exception:
             pass
-    # env overrides
     env_map = {
         "level": "LOG_LEVEL",
         "console_level": "LOG_CONSOLE_LEVEL",
@@ -84,33 +79,26 @@ def _load_config() -> dict:
                 pass
         else:
             cfg[k] = v
-    # domyślne poziomy
     if not cfg["console_level"]:
         cfg["console_level"] = cfg["level"]
     if not cfg["file_level"]:
         cfg["file_level"] = cfg["level"]
     return cfg
 
-# ======================================================
-# PAMIĘCIOWY SINK (do UI)
-# ======================================================
 @dataclass
 class _MemorySink:
     maxlen: int = 2000
     def __post_init__(self):
         self.buffer: deque[str] = deque(maxlen=self.maxlen)
-
     def write(self, message: str) -> None:
         msg = message if message.endswith("\n") else message + "\n"
         self.buffer.append(msg)
-
     def dump(self, n: Optional[int] = None) -> str:
         if not self.buffer:
             return ""
         if n is None or n >= len(self.buffer):
             return "".join(list(self.buffer))
         return "".join(list(self.buffer)[-n:])
-
     def lines(self, n: Optional[int] = None) -> list[str]:
         if not self.buffer:
             return []
@@ -121,12 +109,8 @@ class _MemorySink:
 _MEM_SINK = _MemorySink(DEFAULTS["memory_buffer"])
 
 def get_memory_logs(n: Optional[int] = None) -> list[str]:
-    """Zwraca ostatnie linie logów z bufora pamięci."""
     return _MEM_SINK.lines(n)
 
-# ======================================================
-# PRZECHWYTYWANIE logging / warnings → loguru
-# ======================================================
 class InterceptHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -152,44 +136,30 @@ def patch_std_logging(level: str = "INFO") -> None:
 def silence(names: Iterable[str], level: str = "WARNING") -> None:
     for n in names:
         try:
-            _logger.disable(n)  # loguru-natywne wyciszenie „loggera-nazwanego”
+            _logger.disable(n)
         except Exception:
             pass
         logging.getLogger(n).setLevel(level)
 
-# ======================================================
-# FORMATY
-# ======================================================
+# >>> Węższy, czytelniejszy format konsoli <<<
 _CONSOLE_FMT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-    "<level>{level: <8}</level> | "
-    "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
-    "{message} "
-    "{extra}"
+    "<level>{level: <5}</level> | "
+    "{message}"
 )
 
-_FILE_FMT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message} {extra}"
+_FILE_FMT = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} | {message}"
 
-# ======================================================
-# GLOBALNY LOGGER I KONFIGURACJA
-# ======================================================
 _configured = False
 
 def configure_logger(force: bool = False) -> "_logger.__class__":
-    """
-    Konfiguruje logera globalnie. Idempotentne.
-    Źródła konfiguracji: config.yaml[logging], ENV.
-    """
     global _configured
     if _configured and not force:
         return _logger
 
     cfg = _load_config()
-
-    # reset
     _logger.remove()
 
-    # konsola
     _logger.add(
         sys.stderr,
         level=cfg["console_level"],
@@ -200,7 +170,6 @@ def configure_logger(force: bool = False) -> "_logger.__class__":
         enqueue=cfg["enqueue"],
     )
 
-    # plik tekstowy
     logfile = LOG_DIR / cfg["log_filename"]
     _logger.add(
         logfile,
@@ -213,7 +182,6 @@ def configure_logger(force: bool = False) -> "_logger.__class__":
         enqueue=cfg["enqueue"],
     )
 
-    # plik JSONL
     if cfg["serialize_json"]:
         jsonfile = LOG_DIR / cfg["json_filename"]
         _logger.add(
@@ -227,73 +195,50 @@ def configure_logger(force: bool = False) -> "_logger.__class__":
             enqueue=cfg["enqueue"],
         )
 
-    # bufor pamięci (do UI)
     _logger.add(
         _MEM_SINK.write,
         level=cfg["console_level"],
-        format=_FILE_FMT,
+        format=_FILE_FMT,  # w buforze zostawiamy info o module/linie
         backtrace=False,
         diagnose=False,
         enqueue=False,
     )
 
-    # przechwytywanie std logging/warnings
     patch_std_logging(cfg["level"])
-
-    # domyślne wyciszenia
     silence(["matplotlib", "prophet", "fbprophet", "urllib3", "PIL", "numexpr", "chromadb", "pinecone"], level="WARNING")
-
-    # zbindowany kontekst aplikacji
     _logger.bind(app=cfg["app_name"])
-
     _configured = True
     return _logger
 
-# od razu konfigurujemy na imporcie (bezpiecznie – idempotentne)
 configure_logger()
-
-# Eksport kompatybilnego symbolu
 logger = _logger
 
-# ======================================================
-# POMOCNICZE API
-# ======================================================
 def get_logger(module: Optional[str] = None, **context: Any):
-    """
-    Zwraca zbindowanego loggera. Przykład:
-        log = get_logger(__name__, request_id=req_id)
-        log.info("Start")
-    """
     if module:
         context = {"mod": module, **context}
     return logger.bind(**context)
 
 def set_level(level: str) -> None:
-    """Ustaw poziom na żywo (wszystkie sinki)."""
-    # loguru nie ma globalnego 'setLevel', ale można dodać nowy sink/zdjąć stare.
-    # Najprościej: prze-konfiguruj.
     os.environ["LOG_LEVEL"] = level
     configure_logger(force=True)
 
 def with_context(**ctx: Any):
-    """Context manager do tymczasowego nadania kontekstu."""
     class _Ctx:
         def __enter__(self):
             self._bound = logger.bind(**ctx)
             self._old = logger
-            globals()["logger"] = self._bound  # podmień referencję w module
+            globals()["logger"] = self._bound
             return self._bound
         def __exit__(self, exc_type, exc, tb):
             globals()["logger"] = _logger
     return _Ctx()
 
 def log_exception(msg: str = "Unhandled exception", **extra: Any):
-    """Dekorator do automatycznego logowania wyjątków."""
     def _decorator(func):
         def _wrapped(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except Exception as e:
+            except Exception:
                 logger.bind(**extra).exception(msg)
                 raise
         return _wrapped

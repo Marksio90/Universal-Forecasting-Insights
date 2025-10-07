@@ -1,18 +1,18 @@
-# app.py
+# app.py (Variant A: only built-in page navigation)
 from __future__ import annotations
 import os
-import io
 import json
 import pathlib
 import importlib.util as _ilus
 from typing import Optional, Dict, Any
 
 import yaml
+import numpy as np
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
-# --- App paths
+# --- Paths
 APP_DIR = pathlib.Path(__file__).resolve().parent
 ASSETS = APP_DIR / "assets"
 STYLES = ASSETS / "styles" / "custom.css"
@@ -24,17 +24,13 @@ EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 # --- Env
 load_dotenv()
 
-# --- Safe config load
+# --- Config
 def _load_cfg() -> Dict[str, Any]:
-    base = {
-        "app": {"title": "Intelligent Predictor"},
-        "logging": {"level": "INFO"},
-    }
+    base = {"app": {"title": "Intelligent Predictor"}, "logging": {"level": "INFO"}}
     if CONFIG.exists():
         try:
             with open(CONFIG, "r", encoding="utf-8") as f:
                 raw = yaml.safe_load(f) or {}
-            # płytkie scalenie
             base["app"].update(raw.get("app") or {})
             base["logging"].update(raw.get("logging") or {})
         except Exception:
@@ -43,14 +39,13 @@ def _load_cfg() -> Dict[str, Any]:
 
 CFG = _load_cfg()
 
-# --- Logging (PRO)
+# --- Logging
 try:
     from src.utils.logger import configure_logger, get_logger, get_memory_logs, set_level
     configure_logger()
     log = get_logger(__name__)
     log.info("App boot")
 except Exception:
-    # awaryjny fallback
     import sys
     from loguru import logger as log
     log.remove()
@@ -58,7 +53,7 @@ except Exception:
     def get_memory_logs(n: Optional[int] = None): return []
     def set_level(level: str): pass
 
-# --- Streamlit Page Config
+# --- Streamlit page
 st.set_page_config(
     page_title=CFG["app"].get("title", "Intelligent Predictor"),
     page_icon="📊",
@@ -66,25 +61,24 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# --- Custom CSS
+# --- CSS
 if STYLES.exists():
     st.markdown(f"<style>{STYLES.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 # ======================================================================================
-# Utilities
+# Utils
 # ======================================================================================
 def _mod_available(name: str) -> bool:
     return _ilus.find_spec(name) is not None
 
-def _badge(ok: bool, label: str) -> str:
-    return f"{'🟢' if ok else '🔴'} {label}"
-
-def _switch_page(target: str) -> None:
-    """Bezpieczna nawigacja (zgodna z wersją Streamlit)."""
+def _import_status(mod: str):
+    import importlib, importlib.metadata
     try:
-        st.switch_page(target)
-    except Exception:
-        st.info("Użyj menu po lewej, aby przejść do odpowiedniej zakładki.")
+        importlib.import_module(mod)
+        ver = importlib.metadata.version(mod.split(".")[0])
+        return True, ver, ""
+    except Exception as e:
+        return False, "", str(e)
 
 def _put_session(key: str, val: Any) -> None:
     st.session_state[key] = val
@@ -92,29 +86,33 @@ def _put_session(key: str, val: Any) -> None:
 def _get_df() -> Optional[pd.DataFrame]:
     return st.session_state.get("df") or st.session_state.get("df_raw")
 
-# Demo datasets (lekki seed do szybkich testów UI)
+# Demo datasets
 def _demo_timeseries(n: int = 120) -> pd.DataFrame:
     idx = pd.date_range("2023-01-01", periods=n, freq="D")
-    rng = pd.Series(range(n), index=idx)
-    noise = pd.Series(pd.Series(pd.np.random.RandomState(42).normal(0, 1.0, n), index=idx))  # type: ignore
-    y = 100 + 0.2 * rng + 10 * pd.np.sin(2 * pd.np.pi * (rng / 7.0)) + noise  # type: ignore
+    t = np.arange(n)
+    rng = np.random.default_rng(42)
+    y = 100 + 0.2 * t + 10 * np.sin(2 * np.pi * (t / 7.0)) + rng.normal(0, 1.0, n)
     return pd.DataFrame({"date": idx, "sales": y.round(2)})
 
 def _demo_classification(n: int = 200) -> pd.DataFrame:
-    rs = pd.np.random.RandomState(7)  # type: ignore
-    x1 = rs.normal(0, 1, n)
-    x2 = rs.normal(0, 1, n)
-    seg = rs.choice(["A", "B", "C"], size=n, p=[0.5, 0.3, 0.2])
-    p = 1 / (1 + pd.np.exp(-(0.7 * x1 - 1.1 * x2 + (seg == "B") * 0.6 + rs.normal(0, 0.4, n))))  # type: ignore
+    rng = np.random.default_rng(7)
+    x1 = rng.normal(0, 1, n)
+    x2 = rng.normal(0, 1, n)
+    seg = rng.choice(["A", "B", "C"], size=n, p=[0.5, 0.3, 0.2])
+    p = 1.0 / (1.0 + np.exp(-(0.7 * x1 - 1.1 * x2 + (seg == "B") * 0.6 + rng.normal(0, 0.4, n))))
     y = (p > 0.5).astype(int)
     return pd.DataFrame({"x1": x1, "x2": x2, "segment": seg, "target": y})
 
 # Health checks
-def _health_checks() -> Dict[str, bool]:
+def _health_checks() -> Dict[str, Any]:
+    yp_ok, _, yp_err = _import_status("ydata_profiling")
+    ph_ok, _, ph_err = _import_status("prophet")
     return {
         "openai_key": bool(os.getenv("OPENAI_API_KEY")),
-        "prophet": _mod_available("prophet"),
-        "ydata_profiling": _mod_available("ydata_profiling"),
+        "prophet": ph_ok,
+        "prophet_err": ph_err,
+        "ydata_profiling": yp_ok,
+        "ydata_profiling_err": yp_err,
         "xgboost": _mod_available("xgboost"),
         "lightgbm": _mod_available("lightgbm"),
         "sqlalchemy": _mod_available("sqlalchemy"),
@@ -122,33 +120,17 @@ def _health_checks() -> Dict[str, bool]:
     }
 
 # ======================================================================================
-# Sidebar — Controls
+# Sidebar — only settings & utilities (no custom nav)
 # ======================================================================================
 with st.sidebar:
     st.markdown("### ⚙️ Ustawienia")
-
-    # Tryb logów
     lvl = st.selectbox("Poziom logowania", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
     set_level(lvl)
 
-    # Szybkie akcje / Nawigacja
-    st.markdown("### 🚀 Akcje")
-    if st.button("📤 Przejdź do Upload"):
-        _switch_page("pages/1_📤_Upload_Data.py")
-    if st.button("🔍 Przejdź do EDA"):
-        _switch_page("pages/2_🔍_EDA_Analysis.py")
-    if st.button("🤖 Przejdź do AI Insights"):
-        _switch_page("pages/3_🤖_AI_Insights.py")
-    if st.button("📈 Przejdź do Predictions"):
-        _switch_page("pages/4_📈_Predictions.py")
-    if st.button("📊 Przejdź do Forecasting"):
-        _switch_page("pages/5_📊_Forecasting.py")
-    if st.button("📋 Przejdź do Reports"):
-        _switch_page("pages/6_📋_Reports.py")
+    st.markdown("### 🚀 Nawigacja")
+    st.caption("Użyj listy stron powyżej (Upload → Reports).")
 
     st.markdown("---")
-
-    # Demo dane
     st.markdown("### 🧪 Dane demo")
     demo_choice = st.selectbox("Załaduj zestaw", ["—", "Timeseries: Sales (daily)", "Classification: Toy"])
     if st.button("Wczytaj demo"):
@@ -172,9 +154,6 @@ with st.sidebar:
             del st.session_state[k]
         st.experimental_rerun()
 
-    st.markdown("---")
-    st.caption("💡 Użyj menu powyżej, aby szybko przejść między zakładkami.")
-
 # ======================================================================================
 # Header
 # ======================================================================================
@@ -186,21 +165,18 @@ with col1:
 with col2:
     st.markdown(f"## {CFG['app'].get('title', 'Intelligent Predictor')} — Intelligent Analytics & Forecasting Suite")
 
-# OpenAI status + quick test
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
-if OPENAI_KEY:
-    st.caption("OpenAI key status: 🟢")
-else:
-    st.caption("OpenAI key status: 🔴 (ustaw `OPENAI_API_KEY` w .env)")
+st.caption(f"OpenAI key status: {'🟢' if OPENAI_KEY else '🔴 (ustaw `OPENAI_API_KEY` w .env)'}")
 
 with st.expander("🧪 Test OpenAI (opcjonalnie)"):
     from src.ai_engine.openai_integrator import chat_completion
     if st.button("Wyślij testowy prompt"):
         out = chat_completion(system="You are a test.", user="Odpowiedz: OK.", model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
         st.write(out)
+    st.caption("Jeśli nie ma odpowiedzi: sprawdź `.env` i połączenie sieciowe.")
 
 # ======================================================================================
-# Quick intro
+# Intro
 # ======================================================================================
 st.write(
     """
@@ -216,11 +192,9 @@ st.write(
 )
 
 # ======================================================================================
-# Live preview (jeśli dane w sesji)
+# Live preview (if df in session)
 # ======================================================================================
 df = _get_df()
-
-# KPI + mini-EDA preview
 try:
     from src.visualization.dashboards import kpi_board, eda_overview
 except Exception:
@@ -242,26 +216,28 @@ c1, c2, c3 = st.columns(3)
 with c1:
     st.subheader("🩺 Health")
     st.markdown("\n".join([
-        _badge(hc["openai_key"], "OpenAI API key"),
-        _badge(hc["prophet"], "Prophet"),
-        _badge(hc["ydata_profiling"], "ydata-profiling"),
+        f"{'🟢' if hc['openai_key'] else '🔴'} OpenAI API key",
+        f"{'🟢' if hc['prophet'] else '🔴'} Prophet",
+        f"{'🟢' if hc['ydata_profiling'] else '🔴'} ydata-profiling",
     ]))
+    if not hc["ydata_profiling"] and hc.get("ydata_profiling_err"):
+        st.caption(f"ydata-profiling error: {hc['ydata_profiling_err'][:180]}")
 with c2:
     st.subheader("🧠 ML libs")
     st.markdown("\n".join([
-        _badge(hc["xgboost"], "XGBoost"),
-        _badge(hc["lightgbm"], "LightGBM"),
+        f"{'🟢' if hc['xgboost'] else '🔴'} XGBoost",
+        f"{'🟢' if hc['lightgbm'] else '🔴'} LightGBM",
     ]))
 with c3:
     st.subheader("🗄️ Storage / DB")
     st.markdown("\n".join([
-        _badge(hc["sqlalchemy"], "SQLAlchemy / SQLite"),
-        _badge(hc["redis"], "Redis cache"),
-        _badge(EXPORTS_DIR.exists(), f"Exports dir: {EXPORTS_DIR}"),
+        f"{'🟢' if hc['sqlalchemy'] else '🔴'} SQLAlchemy / SQLite",
+        f"{'🟢' if hc['redis'] else '🔴'} Redis cache",
+        f"🟢 Exports dir: `{EXPORTS_DIR}`",
     ]))
 
 # ======================================================================================
-# Model registry (skrót)
+# Model registry (summary)
 # ======================================================================================
 with st.expander("🧾 Rejestr modeli (skrót)"):
     try:
@@ -288,18 +264,18 @@ with st.expander("🛠️ Stan sesji i logi (debug)"):
     })
     st.text("Ostatnie logi:")
     try:
-        st.code("".join(get_memory_logs(400)) or "(pusto)", language="log")
+        logs_txt = "".join(get_memory_logs(300)) or "(pusto)"
+        st.code(logs_txt, language="text")
     except Exception:
         st.write("(bufor logów niedostępny)")
 
 # ======================================================================================
-# Quick export (z wygody, pełny w zakładce Reports)
+# Quick export (shortcut; full in Reports page)
 # ======================================================================================
 with st.expander("📦 Szybki eksport (demo)"):
     if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
         csv_bytes = df.to_csv(index=False).encode("utf-8")
         st.download_button("⬇️ Pobierz dane (CSV)", data=csv_bytes, file_name="data.csv", mime="text/csv")
-        # Minimalny kontekst raportu
         ctx = {
             "title": "Raport (quick)",
             "metrics": {
@@ -314,7 +290,6 @@ with st.expander("📦 Szybki eksport (demo)"):
             from src.ai_engine.report_generator import build_report_html
             html = build_report_html(ctx)
         except Exception:
-            # fallback prosty HTML
             html = f"""<!doctype html><html><head><meta charset="utf-8"><title>{ctx['title']}</title></head>
 <body><h1>{ctx['title']}</h1><pre>{json.dumps(ctx, ensure_ascii=False, indent=2)}</pre></body></html>"""
         st.download_button("🧾 Pobierz szybki raport (HTML)", data=html, file_name="report.html", mime="text/html")

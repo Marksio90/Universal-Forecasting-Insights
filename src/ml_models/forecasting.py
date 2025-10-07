@@ -1,88 +1,142 @@
-# src/ml_models/forecasting.py
+# src/ml_models/forecasting.py — TURBO PRO (back-compat API)
 from __future__ import annotations
-import math
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
 from prophet import Prophet
 
-DATE_HINTS = ("date", "time", "timestamp", "data", "czas", "dt")
+# =========================
+# Logger
+# =========================
+LOGGER = logging.getLogger("forecasting")
+if not LOGGER.handlers:
+    LOGGER.setLevel(logging.INFO)
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S"))
+    LOGGER.addHandler(_h)
+    LOGGER.propagate = False
 
-# ----------------------------
+# =========================
+# Stałe / heurystyki
+# =========================
+DATE_HINTS = ("date", "time", "timestamp", "data", "czas", "dt", "day", "month", "year")
+MIN_TIME_POINTS = 10
+MAX_TIME_POINTS = 100_000
+MAX_HORIZON_STEPS = 1200  # twardy limit bezpieczeństwa
+
+# =========================
 # Utils: czas i częstotliwość
-# ----------------------------
+# =========================
 def _detect_datetime_index(df: pd.DataFrame, date_col: Optional[str] = None) -> pd.DataFrame:
-    """Ustawia indeks czasowy. Najpierw używa `date_col` jeśli podano, w przeciwnym razie heurystyka po nazwach."""
+    """
+    Ustawia (i sortuje) indeks czasowy.
+    - preferuje `date_col` jeśli podano,
+    - w innym wypadku szuka po nazwach z DATE_HINTS,
+    - ostatni fallback: próba parsowania 1. kolumny.
+    """
     out = df.copy()
+    # jeśli już mamy DatetimeIndex → tylko posortuj i od-strefuj
     if isinstance(out.index, pd.DatetimeIndex):
+        idx = out.index
+        if idx.tz is not None:
+            out.index = idx.tz_convert("UTC").tz_localize(None)
         return out.sort_index()
 
     cand = None
     if date_col and date_col in out.columns:
         cand = date_col
     else:
-        # heurystyka po nazwach
         for c in out.columns:
             lc = str(c).lower()
             if any(h in lc for h in DATE_HINTS):
                 cand = c
                 break
 
+    def _try_set(col: str) -> Optional[pd.DataFrame]:
+        series = pd.to_datetime(out[col], errors="coerce", infer_datetime_format=True)
+        if series.notna().mean() < 0.5:
+            return None
+        idx = series
+        if idx.dt.tz is not None:
+            idx = idx.dt.tz_convert("UTC").dt.tz_localize(None)
+        tmp = out.copy()
+        tmp[col] = idx
+        tmp = tmp.set_index(col)
+        return tmp.sort_index()
+
     if cand is not None:
         try:
-            out[cand] = pd.to_datetime(out[cand], errors="coerce", infer_datetime_format=True)
-            out = out.set_index(cand).sort_index()
-            return out
+            tmp = _try_set(cand)
+            if tmp is not None:
+                return tmp
         except Exception:
             pass
 
-    # last resort – jeżeli pierwsza kolumna wygląda na datę
-    first = out.columns[0]
+    # fallback: 1. kolumna
     try:
-        out[first] = pd.to_datetime(out[first], errors="coerce", infer_datetime_format=True)
-        if out[first].notna().mean() > 0.6:
-            out = out.set_index(first).sort_index()
-            return out
+        first = out.columns[0]
+        tmp = _try_set(first)
+        if tmp is not None:
+            return tmp
     except Exception:
         pass
 
-    # nie udało się – zwróć oryginał (Prophet i tak wymaga kolumny ds)
-    return out
+    return out  # bez indeksu czasu — później rzucimy kontrolowany błąd
+
 
 def _infer_freq(idx: pd.DatetimeIndex) -> str:
-    """Zgadnij częstotliwość z indeksu; fallback do 'D'."""
+    """
+    Zgadnij częstotliwość z indeksu; fallback na heurystykę po medianie różnic.
+    Normalizuje aliasy do: Y, Q, M/MS, W, D, H, min, S.
+    """
     if not isinstance(idx, pd.DatetimeIndex) or len(idx) < 3:
         return "D"
-    f = pd.infer_freq(idx)
-    if f:
-        # normalizuj do aliasów akceptowanych przez Prophet
-        f = f.upper()
-        if f.startswith("A"): return "Y"
-        if f.startswith("Y"): return "Y"
-        if f.startswith("Q"): return "Q"
-        if f.startswith("M"): return "M"
-        if f.startswith("W"): return "W"
-        if f.startswith("D"): return "D"
-        if f.startswith("H"): return "H"
-        if f.startswith("T"): return "min"  # minute
-        if f.startswith("S"): return "S"
-        return "D"
 
-    # heurystyka po medianie różnic
-    diffs = np.diff(idx.view("i8"))  # ns
+    try:
+        f = pd.infer_freq(idx)
+    except Exception:
+        f = None
+
+    if f:
+        f = f.upper()
+        # normalizacja najczęstszych wariantów
+        if f.startswith("A") or f.startswith("Y"):
+            return "Y"
+        if f.startswith("Q"):
+            return "Q"
+        if f in ("MS", "M"):
+            return "MS"
+        if f.startswith("M"):
+            return "MS"
+        if f.startswith("W"):
+            return "W"
+        if f.startswith("D"):
+            return "D"
+        if f.startswith("H"):
+            return "H"
+        if f.startswith("T"):
+            return "min"
+        if f.startswith("S"):
+            return "S"
+
+    # heurystyka po medianie odstępów (ns → s)
+    diffs = np.diff(idx.view("i8"))
     if len(diffs) == 0:
         return "D"
-    med = np.median(diffs) / 1e9  # sekundy
-    day = 86400
-    if med < 60: return "S"
-    if med < 3600: return "min"
-    if med < day: return "H"
-    if med < 7 * day: return "D"
-    if med < 28 * day: return "W"
-    if med < 92 * day: return "M"
-    if med < 366 * day: return "Q"
+    med_s = float(np.median(diffs) / 1e9)
+    day = 86400.0
+    if med_s < 60: return "S"
+    if med_s < 3600: return "min"
+    if med_s < day: return "H"
+    if med_s < 7 * day: return "D"
+    if med_s < 28 * day: return "W"
+    if med_s < 92 * day: return "MS"
+    if med_s < 366 * day: return "Q"
     return "Y"
+
 
 def _boolean_seasonality_flags(freq: str) -> Tuple[bool, bool, bool]:
     """Określa, które sezonowości Propheta mają sens przy danej częstotliwości."""
@@ -92,26 +146,77 @@ def _boolean_seasonality_flags(freq: str) -> Tuple[bool, bool, bool]:
     daily = f in ("H", "S", "MIN")
     return yearly, weekly, daily
 
+
+def _freq_to_prophet_alias(freq: str) -> str:
+    """Mapuje alias na taki, jaki lubi Prophet.make_future_dataframe."""
+    return {
+        "Y": "Y",
+        "A": "Y",
+        "Q": "Q",
+        "QS": "QS",
+        "M": "MS",
+        "MS": "MS",
+        "W": "W",
+        "D": "D",
+        "H": "H",
+        "MIN": "min",
+        "S": "S",
+    }.get(freq.upper(), "D")
+
+
+def _seasonal_period_from_freq(freq: str) -> int:
+    """Heurystyka okresu sezonowego m (dla MASE i interpretacji)."""
+    f = freq.upper()
+    if f in ("MS", "M"): return 12
+    if f in ("Q", "QS"): return 4
+    if f == "W": return 52
+    if f == "D": return 7
+    if f == "H": return 24
+    if f == "MIN": return 60
+    if f == "S": return 60
+    return 1
+
+
+# =========================
+# Utils: przygotowanie i metryki
+# =========================
 def _prepare_y(series: pd.Series) -> pd.Series:
     y = pd.to_numeric(series, errors="coerce")
     return y
 
+
 def _pick_exogenous(df: pd.DataFrame, target: str, limit: int = 15) -> List[str]:
-    """Wybór kandydatów na regresory zewnętrzne (numeryczne, co najmniej 3 unikalne)."""
-    cols = []
+    """Wybór kandydatów na regresory zewnętrzne (numeryczne, >=3 wartości unikalne, najwyższa zmienność)."""
+    cols: List[str] = []
     for c in df.columns:
         if c == target:
             continue
         s = df[c]
         if pd.api.types.is_numeric_dtype(s) and s.nunique(dropna=True) >= 3:
             cols.append(c)
-    # prosta heurystyka: wybierz do `limit` najbardziej zmiennych
-    cols = sorted(cols, key=lambda c: float(df[c].std(skipna=True) or 0), reverse=True)[:limit]
+    cols = sorted(cols, key=lambda c: float(df[c].std(skipna=True) or 0.0), reverse=True)[:limit]
     return cols
 
-# --------------------------------
-# Główny interfejs: forecast()
-# --------------------------------
+
+def _smape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    a = np.abs(y_true - y_pred)
+    b = (np.abs(y_true) + np.abs(y_pred)) / 2.0
+    denom = np.where(b == 0, 1.0, b)
+    return float(np.mean(a / denom) * 100.0)
+
+
+def _mase(y_true: np.ndarray, y_pred: np.ndarray, m: int = 1) -> float:
+    y = np.asarray(y_true, dtype=float)
+    if len(y) <= m + 1:
+        m = 1
+    denom = np.mean(np.abs(y[m:] - y[:-m])) if len(y) > m else np.mean(np.abs(np.diff(y)))
+    denom = denom if denom and np.isfinite(denom) else 1.0
+    return float(np.mean(np.abs(y_true - y_pred)) / denom)
+
+
+# =========================
+# Publiczny interfejs
+# =========================
 def forecast(
     df: pd.DataFrame,
     target: str,
@@ -119,105 +224,135 @@ def forecast(
     *,
     date_col: Optional[str] = None,
     seasonality_mode: str = "additive",            # "additive" | "multiplicative"
-    changepoint_prior_scale: float = 0.1,          # większa → bardziej czuły na zmiany trendu
+    changepoint_prior_scale: float = 0.1,          # większa → bardziej czuły trend
     extra_regressors: Union[None, str, List[str]] = None,  # None | "auto" | ["col1", ...]
-    holidays: Optional[pd.DataFrame] = None,       # opcjonalna tabela świąt (ds, holiday)
+    holidays: Optional[pd.DataFrame] = None,       # opcjonalnie: kolumny ["ds","holiday", ...]
     growth: str = "linear",                        # "linear" | "logistic"
     cap: Optional[float] = None,
     floor: Optional[float] = None,
-    freq: Optional[str] = None,                    # wymuś częstotliwość (np. "MS")
+    freq: Optional[str] = None,                    # np. "MS"
 ) -> Tuple[Prophet, pd.DataFrame]:
     """
-    Trenuje model Prophet i zwraca (model, forecast_df).
-    forecast_df: kolumny `ds`, `yhat`, `yhat_lower`, `yhat_upper` (+ ewentualne regresory).
+    Trenuje Prophet i zwraca (model, forecast_df).
+    forecast_df zawiera: `ds`, `yhat`, `yhat_lower`, `yhat_upper` (+ attrs['forecast_meta']).
     """
+    # --- walidacje wejścia ---
     assert isinstance(df, pd.DataFrame) and target in df.columns, "Nieprawidłowe dane lub brak kolumny celu."
+    if not isinstance(horizon, (int, np.integer)) or horizon <= 0:
+        raise ValueError("`horizon` musi być dodatnią liczbą całkowitą.")
+    if horizon > MAX_HORIZON_STEPS:
+        LOGGER.warning("przycinam horizon=%s → %s (MAX_HORIZON_STEPS)", horizon, MAX_HORIZON_STEPS)
+        horizon = MAX_HORIZON_STEPS
 
-    # 1) Indeks czasu + sortowanie
-    df_idx = _detect_datetime_index(df, date_col=date_col)
-    if not isinstance(df_idx.index, pd.DatetimeIndex):
-        # jeśli nadal brak indeksu czasu – spróbuj wymusić z targetem jako seria
+    # 1) Indeks czasu + sanity
+    frame = _detect_datetime_index(df, date_col=date_col)
+    if not isinstance(frame.index, pd.DatetimeIndex):
         raise ValueError("Nie wykryto prawidłowej kolumny czasu. Podaj `date_col` lub dodaj kolumnę daty.")
-    df_idx = df_idx.sort_index()
 
-    # 2) Przygotowanie ramki 'ds', 'y' (+ regresory)
-    y = _prepare_y(df_idx[target])
-    data = pd.DataFrame({"ds": df_idx.index, "y": y})
-    # usuń wiersze bez y
-    data = data.dropna(subset=["y"])
+    # posortuj, usuń duplikaty w indeksie (ostatnia wygrywa), usuń NaT
+    frame = frame[frame.index.notna()].sort_index()
+    if frame.index.has_duplicates:
+        frame = frame[~frame.index.duplicated(keep="last")]
 
-    # growth logistic?
+    if len(frame) < MIN_TIME_POINTS:
+        raise ValueError(f"Zbyt mało punktów czasowych: {len(frame)} < {MIN_TIME_POINTS}.")
+    if len(frame) > MAX_TIME_POINTS:
+        LOGGER.warning("przycinam liczbę punktów %s → %s (MAX_TIME_POINTS)", len(frame), MAX_TIME_POINTS)
+        frame = frame.iloc[-MAX_TIME_POINTS:, :]
+
+    # 2) Przygotowanie ds/y (+ regresory)
+    y = _prepare_y(frame[target])
+    data = pd.DataFrame({"ds": frame.index, "y": y}).dropna(subset=["y"])
+
+    # growth logistic – bezpieczne cap/floor
     if growth == "logistic":
-        if cap is None:
-            cap = float(np.nanmax(y) * 1.2) if len(y) else 1.0
-        if floor is None:
-            floor = float(np.nanmin(y) * 0.8) if len(y) else 0.0
+        y_max = float(np.nanmax(data["y"])) if len(data) else 1.0
+        y_min = float(np.nanmin(data["y"])) if len(data) else 0.0
+        if cap is None or cap <= y_max:
+            cap = max(y_max * 1.2, y_max + 1e-6)
+        if floor is None or floor >= cap or floor >= y_min:
+            floor = min(y_min * 0.8, cap - 1e-6)
         data["cap"] = cap
         data["floor"] = floor
 
     # regresory zewnętrzne
     chosen_reg: List[str] = []
     if isinstance(extra_regressors, list):
-        chosen_reg = [c for c in extra_regressors if c in df_idx.columns and c != target]
+        chosen_reg = [c for c in extra_regressors if c in frame.columns and c != target]
     elif isinstance(extra_regressors, str) and extra_regressors.lower() == "auto":
-        chosen_reg = _pick_exogenous(df_idx, target)
-    # dołącz dane regresorów
-    for c in chosen_reg:
-        data[c] = pd.to_numeric(df_idx[c], errors="coerce")
+        chosen_reg = _pick_exogenous(frame, target)
 
-    # 3) Konfiguracja modelu Prophet
-    _freq = (freq or _infer_freq(df_idx.index)).upper()
+    for c in chosen_reg:
+        data[c] = pd.to_numeric(frame[c], errors="coerce")
+
+    # 3) Konfiguracja częstotliwości i sezonowości
+    _freq = (freq or _infer_freq(frame.index))
     yearly, weekly, daily = _boolean_seasonality_flags(_freq)
 
+    # 4) Model
     model = Prophet(
         seasonality_mode=seasonality_mode,
-        changepoint_prior_scale=changepoint_prior_scale,
+        changepoint_prior_scale=float(changepoint_prior_scale),
         yearly_seasonality=yearly,
         weekly_seasonality=weekly,
         daily_seasonality=daily,
         growth=growth,
-        holidays=holidays,  # None jeśli nie podano
+        holidays=holidays if _is_valid_holidays(holidays) else None,
     )
 
-    # Dodatkowe sezonowości (miesięczna/kwartalna) – przy danych miesięcznych/kwartalnych
+    # dodatkowe sezonowości (miesięczna/kwartalna) gdy ma sens
     if _freq in ("M", "MS"):
         model.add_seasonality(name="monthly", period=12, fourier_order=8)
     if _freq in ("Q", "QS"):
         model.add_seasonality(name="quarterly", period=4, fourier_order=4)
 
-    # Zarejestruj regresory
+    # rejestrowanie regresorów
     for c in chosen_reg:
         model.add_regressor(c, standardize="auto")
 
-    # 4) Trening
+    # 5) Trening
     model.fit(data)
 
-    # 5) Future DF
-    # Mapowanie aliasów na coś, co Prophet lubi
-    freq_alias = {"Y": "Y", "A": "Y", "Q": "Q", "QS": "QS", "M": "MS", "MS": "MS",
-                  "W": "W", "D": "D", "H": "H", "MIN": "min", "S": "S"}.get(_freq, "D")
-
+    # 6) Future DF
+    freq_alias = _freq_to_prophet_alias(_freq)
     future = model.make_future_dataframe(periods=int(horizon), freq=freq_alias, include_history=True)
 
-    # growth logistic: uzupełnij cap/floor
     if growth == "logistic":
         future["cap"] = cap
         future["floor"] = floor
 
-    # Dołącz przyszłe wartości regresorów:
-    # jeśli ich nie mamy — forward-fill ostatnią znaną wartością (prostolinijne założenie).
+    # Przyszłe wartości regresorów – prosty FFill ostatniej obserwacji
     if chosen_reg:
-        # oryginalne dane w indeksie „ds”
         aux = data.set_index("ds")[chosen_reg]
         future = future.set_index("ds")
         for c in chosen_reg:
             future[c] = aux[c].reindex(future.index).ffill()
         future = future.reset_index()
 
-    # 6) Prognoza
-    fcst = model.predict(future)[["ds", "yhat", "yhat_lower", "yhat_upper"]]
+    # 7) Prognoza
+    pred = model.predict(future)
+    fcst = pred[["ds", "yhat", "yhat_lower", "yhat_upper"]].copy()
 
-    # 7) Metadane w atrybutach
+    # 8) Metryki (na końcówce historii – pseudo holdout z in-sample)
+    hist = fcst.merge(data[["ds", "y"]], on="ds", how="left")
+    hist_mask = hist["y"].notna()
+    hist_known = hist.loc[hist_mask].copy()
+    # walidacja na końcówce: min( max(12, horizon), 25% historii )
+    val_len = int(min(max(12, horizon), max(1, len(hist_known) // 4)))
+    tail = hist_known.tail(val_len)
+    if not tail.empty:
+        y_true = tail["y"].to_numpy(dtype=float)
+        y_hat = tail["yhat"].to_numpy(dtype=float)
+        smape = _smape(y_true, y_hat)
+        m = _seasonal_period_from_freq(_freq)
+        mase = _mase(y_true, y_hat, m=m)
+        rmse = float(np.sqrt(np.mean((y_true - y_hat) ** 2)))
+        mae = float(np.mean(np.abs(y_true - y_hat)))
+        metrics = {"sMAPE": smape, "MASE": mase, "RMSE": rmse, "MAE": mae, "val_len": int(val_len)}
+    else:
+        metrics = None
+
+    # 9) Metadane
     fcst.attrs["forecast_meta"] = {
         "target": target,
         "n_obs": int(len(data)),
@@ -229,6 +364,35 @@ def forecast(
         "growth": growth,
         "cap": cap,
         "floor": floor,
+        "metrics_tail": metrics,
+        "seasonal_period_hint": _seasonal_period_from_freq(_freq),
+        "warnings": _collect_warnings(frame, chosen_reg),
     }
 
     return model, fcst
+
+
+# =========================
+# Drobne helpery bezpieczeństwa
+# =========================
+def _is_valid_holidays(h: Optional[pd.DataFrame]) -> bool:
+    if h is None or not isinstance(h, pd.DataFrame) or h.empty:
+        return False
+    cols = {c.lower() for c in h.columns}
+    return "ds" in cols and "holiday" in cols
+
+
+def _collect_warnings(frame: pd.DataFrame, regressors: List[str]) -> List[str]:
+    warns: List[str] = []
+    # nieregularny szereg
+    try:
+        if pd.infer_freq(frame.index) is None:
+            warns.append("irregular_frequency_detected")
+    except Exception:
+        pass
+    # braki w regresorach
+    for c in regressors:
+        s = pd.to_numeric(frame[c], errors="coerce")
+        if s.isna().mean() > 0.2:
+            warns.append(f"regressor_{c}_many_nans({s.isna().mean():.0%})")
+    return warns

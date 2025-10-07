@@ -1,3 +1,4 @@
+# cache_engine.py — TURBO PRO (API-kompatybilny)
 from __future__ import annotations
 import os
 import io
@@ -10,7 +11,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, Iterator, TypeVar, Dict, Tuple
 
-# Optional: Streamlit secrets integracja (nie wymagane)
+# Optional: Streamlit secrets
 try:
     import streamlit as st  # type: ignore
 except Exception:
@@ -24,16 +25,15 @@ T = TypeVar("T")
 # ===========================
 # Konfiguracja i stałe
 # ===========================
-
 DEFAULT_NAMESPACE = "intelligent-predictor"
 DEFAULT_TTL = 3600  # sekundy
 CACHE_VERSION = "v1"
 COMPRESS_LEVEL = 3  # 0..9
+AUTO_COMPRESS_THRESHOLD = 4096  # 4KB
 
 # ===========================
 # Interfejs Cache
 # ===========================
-
 class Cache(Protocol):
     enabled: bool
     namespace: str
@@ -46,16 +46,22 @@ class Cache(Protocol):
     def ttl(self, key: str) -> int: ...
     def incr(self, key: str, amount: int = 1, ttl: Optional[int] = None) -> int: ...
     def flush(self, pattern: Optional[str] = None) -> int: ...
-    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> "RedisLock": ...
+    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> "BaseLock": ...
     def status(self) -> str: ...
     def close(self) -> None: ...
 
 # ===========================
 # Konfiguracja z pliku/env/secrets
 # ===========================
-
 def _load_cache_config() -> Dict[str, Any]:
-    cfg: Dict[str, Any] = {"enabled": False, "redis_url": None, "namespace": DEFAULT_NAMESPACE, "default_ttl": DEFAULT_TTL}
+    cfg: Dict[str, Any] = {
+        "enabled": False,
+        "redis_url": None,
+        "namespace": DEFAULT_NAMESPACE,
+        "default_ttl": DEFAULT_TTL,
+        "compression": "zlib",   # none | zlib | auto
+    }
+
     # config.yaml
     try:
         import pathlib
@@ -69,7 +75,7 @@ def _load_cache_config() -> Dict[str, Any]:
                     "redis_url": c.get("redis_url", cfg["redis_url"]),
                     "namespace": c.get("namespace", cfg["namespace"]),
                     "default_ttl": int(c.get("default_ttl", cfg["default_ttl"])),
-                    "compression": c.get("compression", "zlib"),
+                    "compression": c.get("compression", cfg.get("compression")),
                 })
     except Exception:
         pass
@@ -83,23 +89,28 @@ def _load_cache_config() -> Dict[str, Any]:
                 cfg["redis_url"] = s.get("redis_url", cfg["redis_url"])
                 cfg["namespace"] = s.get("namespace", cfg["namespace"])
                 cfg["default_ttl"] = int(s.get("default_ttl", cfg["default_ttl"]))
-                cfg["compression"] = s.get("compression", cfg.get("compression", "zlib"))
+                cfg["compression"] = s.get("compression", cfg.get("compression"))
         except Exception:
             pass
 
     # env overrides
-    cfg["enabled"] = bool(os.getenv("CACHE_ENABLED", str(cfg["enabled"])).lower() in ("1", "true", "yes"))
+    enabled_env = os.getenv("CACHE_ENABLED")
+    if enabled_env is not None:
+        cfg["enabled"] = enabled_env.lower() in ("1", "true", "yes", "on")
+
     cfg["redis_url"] = os.getenv("REDIS_URL", cfg["redis_url"])
     cfg["namespace"] = os.getenv("CACHE_NAMESPACE", cfg["namespace"])
     cfg["default_ttl"] = int(os.getenv("CACHE_DEFAULT_TTL", cfg["default_ttl"]))
-    cfg["compression"] = os.getenv("CACHE_COMPRESSION", cfg.get("compression", "zlib"))
+    cfg["compression"] = os.getenv("CACHE_COMPRESSION", cfg.get("compression", "zlib")).lower()
+
+    if cfg["compression"] not in ("none", "zlib", "auto"):
+        cfg["compression"] = "zlib"
 
     return cfg
 
 # ===========================
 # Serializacja
 # ===========================
-
 def _try_json_dumps(obj: Any) -> Optional[bytes]:
     try:
         return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -109,11 +120,18 @@ def _try_json_dumps(obj: Any) -> Optional[bytes]:
 def _pickle_dumps(obj: Any) -> bytes:
     return pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
 
-def _dumps(obj: Any, compress: bool = True) -> bytes:
+def _should_compress(raw: bytes, mode: str) -> bool:
+    if mode == "none":
+        return False
+    if mode == "zlib":
+        return True
+    # auto
+    return len(raw) >= AUTO_COMPRESS_THRESHOLD
+
+def _dumps(obj: Any, compression_mode: str) -> bytes:
     """
     Zapis obiektu do bajtów:
-      - najpierw JSON (jeśli możliwe),
-      - w przeciwnym razie pickle.
+      - JSON (gdy możliwy) albo pickle.
     Nagłówek: b"IP|v1|<fmt>|<cmp>|" + payload
     """
     payload: bytes
@@ -122,121 +140,135 @@ def _dumps(obj: Any, compress: bool = True) -> bytes:
     if b is None:
         fmt = "pickle"
         b = _pickle_dumps(obj)
-    if compress:
-        b = zlib.compress(b, COMPRESS_LEVEL)
-        cmp_flag = "zlib"
-    else:
-        cmp_flag = "none"
+
+    cmp_flag = "zlib" if _should_compress(b, compression_mode) else "none"
+    body = zlib.compress(b, COMPRESS_LEVEL) if cmp_flag == "zlib" else b
     header = f"IP|{CACHE_VERSION}|{fmt}|{cmp_flag}|".encode("utf-8")
-    return header + b
+    return header + body
 
 def _loads(b: Optional[bytes]) -> Any:
     if b is None:
         return None
+
+    # Szybka ścieżka: spróbuj odczytać nagłówek „IP|...|...|...|”
     try:
-        header, payload = b.split(b"|", 4)[0:4], b.split(b"|", 4)[-1]
-        # header = [b"IP", b"v1", b"fmt", b"cmp"]
-        parts = b.decode("utf-8", errors="ignore").split("|", 4)
-        # robust parse (fallback in edge cases)
-    except Exception:
-        # brak nagłówka – spróbuj raw json/pickle/zlib
-        try:
-            return json.loads(b.decode("utf-8"))
-        except Exception:
+        # Znajdź offset po 4-tym '|' w strumieniu bajtów
+        sep = b"|"
+        idx = -1
+        start = 0
+        parts: list[bytes] = []
+        for _ in range(4):
+            pos = b.find(sep, start)
+            if pos == -1:
+                raise ValueError("header not found")
+            parts.append(b[start:pos])
+            start = pos + 1
+        # parts = [b"IP", b"v1", b"fmt", b"cmp"]
+        magic, ver, fmt_b, cmp_b = parts
+        if magic != b"IP":
+            raise ValueError("bad magic")
+        blob = b[start:]  # reszta po nagłówku
+        fmt = fmt_b.decode("utf-8", errors="ignore")
+        cmp_flag = cmp_b.decode("utf-8", errors="ignore")
+
+        if cmp_flag == "zlib":
             try:
-                return pickle.loads(b)
+                blob = zlib.decompress(blob)
             except Exception:
+                return None
+
+        if fmt == "json":
+            try:
+                return json.loads(blob.decode("utf-8"))
+            except Exception:
+                # spróbuj pickle w ostateczności
                 try:
-                    return pickle.loads(zlib.decompress(b))
+                    return pickle.loads(blob)
                 except Exception:
                     return None
-
-    try:
-        _, ver, fmt, cmp_flag, payload = b.decode("utf-8", errors="ignore").split("|", 4)
-    except Exception:
-        # fallback „bezpieczny”
-        try:
-            return pickle.loads(zlib.decompress(b))
-        except Exception:
-            return None
-
-    blob = payload.encode("utf-8")  # this isn't correct for binary payload; fix below
-    # Prawidłowa ekstrakcja payload z pierwotnego bajtowego bufora:
-    try:
-        # znajdź offset po 4 separatorach '|'
-        sep = b"|"
-        idx = 0
-        for _ in range(4):
-            idx = b.find(sep, idx) + 1
-        blob = b[idx:]
-    except Exception:
-        blob = b
-
-    if cmp_flag == "zlib":
-        try:
-            blob = zlib.decompress(blob)
-        except Exception:
-            return None
-    if fmt == "json":
-        try:
-            return json.loads(blob.decode("utf-8"))
-        except Exception:
-            # spróbuj pickle (gdy nagłówek był mylący)
+        else:
             try:
                 return pickle.loads(blob)
             except Exception:
                 return None
-    else:
-        try:
-            return pickle.loads(blob)
-        except Exception:
-            return None
+    except Exception:
+        # Brak/niepoprawny nagłówek — spróbuj heurystyk
+        for attempt in ("json", "pickle", "zlib+pickle", "zlib+json"):
+            try:
+                if attempt == "json":
+                    return json.loads(b.decode("utf-8"))
+                if attempt == "pickle":
+                    return pickle.loads(b)
+                if attempt == "zlib+pickle":
+                    return pickle.loads(zlib.decompress(b))
+                if attempt == "zlib+json":
+                    return json.loads(zlib.decompress(b).decode("utf-8"))
+            except Exception:
+                continue
+        return None
 
 # ===========================
 # Klucze i nazwy
 # ===========================
-
 def _hash_obj(*parts: Any) -> str:
+    """
+    Stabilny hash argumentów (używa json, a gdy się nie da — pickle).
+    """
     h = hashlib.sha256()
     for p in parts:
         try:
-            h.update(repr(p).encode("utf-8"))
+            h.update(json.dumps(p, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8"))
         except Exception:
-            h.update(str(p).encode("utf-8"))
-    return h.hexdigest()[:40]
+            h.update(pickle.dumps(p, protocol=pickle.HIGHEST_PROTOCOL))
+    return h.hexdigest()[:48]
+
+def _sanitize_key(s: str) -> str:
+    s = s.replace(" ", "_").replace("\n", "_")
+    if len(s) > 180:
+        s = s[:180]
+    return s
 
 def _namespaced(ns: str, key: str) -> str:
-    # bezpieczny klucz redis
-    safe = key.replace(" ", "_").replace("\n", "_")
-    return f"{ns}:{CACHE_VERSION}:{safe}"
+    return f"{ns}:{CACHE_VERSION}:{_sanitize_key(key)}"
 
 # ===========================
 # Lock (SET NX PX) + bezpieczne odblokowanie Lua
 # ===========================
+class BaseLock:
+    def __enter__(self) -> "BaseLock": return self
+    def __exit__(self, exc_type, exc, tb) -> None: return None
+    @property
+    def acquired(self) -> bool: return False
 
-class RedisLock:
+class RedisLock(BaseLock):
     def __init__(self, client: redis.Redis, name: str, ttl_ms: int, wait_ms: int, retry_ms: int):
         self.client = client
-        self.name = f"lock:{name}"
+        self.name = name
         self.token = uuid.uuid4().hex
         self.ttl_ms = ttl_ms
         self.wait_ms = wait_ms
         self.retry_ms = retry_ms
-        self.acquired = False
+        self._acquired = False
+
+    @property
+    def acquired(self) -> bool:
+        return self._acquired
 
     def __enter__(self) -> "RedisLock":
         deadline = time.time() + self.wait_ms / 1000.0
         while time.time() < deadline:
-            if self.client.set(self.name, self.token, nx=True, px=self.ttl_ms):
-                self.acquired = True
+            try:
+                if self.client.set(self.name, self.token, nx=True, px=self.ttl_ms):
+                    self._acquired = True
+                    break
+            except Exception:
                 break
             time.sleep(self.retry_ms / 1000.0)
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if not self.acquired:
+        if not self._acquired:
             return
-        # bezpieczne zwolnienie: odblokuj tylko, jeśli token pasuje
         unlock_script = """
         if redis.call('get', KEYS[1]) == ARGV[1] then
             return redis.call('del', KEYS[1])
@@ -247,16 +279,19 @@ class RedisLock:
         try:
             self.client.eval(unlock_script, 1, self.name, self.token)
         except Exception:
-            # w ostateczności – spróbuj zwykłe del (może odblokować cudzy lock, ale to edge case)
             try:
                 self.client.delete(self.name)
             except Exception:
                 pass
+        finally:
+            self._acquired = False
+
+class NoopLock(BaseLock):
+    pass
 
 # ===========================
 # Implementacje Cache
 # ===========================
-
 @dataclass
 class NoopCache:
     enabled: bool = False
@@ -267,22 +302,21 @@ class NoopCache:
     def delete(self, key: str) -> int: return 0
     def exists(self, key: str) -> bool: return False
     def expire(self, key: str, ttl: int) -> bool: return False
-    def ttl(self, key: str) -> int: return -2  # -2 = nie istnieje
+    def ttl(self, key: str) -> int: return -2
     def incr(self, key: str, amount: int = 1, ttl: Optional[int] = None) -> int: return 0
     def flush(self, pattern: Optional[str] = None) -> int: return 0
-    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> RedisLock:
-        # Lock „udaje”, że nie został pozyskany
-        return RedisLock(None, name, ttl_ms, wait_ms, retry_ms)  # type: ignore[arg-type]
+    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> BaseLock:
+        return NoopLock()
     def status(self) -> str: return "Cache disabled (set cache.enabled=true in config.yaml or REDIS_URL)."
     def close(self) -> None: return None
 
 class RedisCache:
-    def __init__(self, client: redis.Redis, namespace: str, default_ttl: int, compression: bool):
+    def __init__(self, client: redis.Redis, namespace: str, default_ttl: int, compression_mode: str):
         self.client = client
         self.namespace = namespace
         self.enabled = True
         self.default_ttl = default_ttl
-        self.compression = compression
+        self.compression_mode = compression_mode  # none | zlib | auto
 
     # --------------- podstawowe ---------------
     def get(self, key: str, default: Any = None) -> Any:
@@ -297,7 +331,7 @@ class RedisCache:
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         k = _namespaced(self.namespace, key)
         try:
-            blob = _dumps(value, compress=self.compression)
+            blob = _dumps(value, compression_mode=self.compression_mode)
             ex = ttl if ttl is not None else self.default_ttl
             return bool(self.client.set(k, blob, ex=ex))
         except Exception:
@@ -347,7 +381,7 @@ class RedisCache:
         """
         try:
             pref = _namespaced(self.namespace, "")
-            match = f"{pref}*{pattern or ''}"
+            match = f"{pref}{pattern or '*'}"
             n = 0
             for key in self.client.scan_iter(match):
                 n += int(self.client.delete(key))
@@ -356,7 +390,7 @@ class RedisCache:
             return 0
 
     # --------------- lock ---------------
-    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> RedisLock:
+    def lock(self, name: str, ttl_ms: int = 10000, wait_ms: int = 10000, retry_ms: int = 150) -> BaseLock:
         lname = _namespaced(self.namespace, f"lock:{name}")
         return RedisLock(self.client, lname, ttl_ms=ttl_ms, wait_ms=wait_ms, retry_ms=retry_ms)
 
@@ -381,7 +415,6 @@ class RedisCache:
 # ===========================
 # Inicjalizacja singletonu
 # ===========================
-
 _CACHE: Cache = NoopCache()
 
 def _init_cache() -> Cache:
@@ -397,11 +430,21 @@ def _init_cache() -> Cache:
         return _CACHE
 
     try:
-        client = redis.Redis.from_url(url, decode_responses=False, health_check_interval=30, socket_timeout=5)
-        # proste sprawdzenie połączenia
+        client = redis.Redis.from_url(
+            url,
+            decode_responses=False,
+            health_check_interval=30,
+            socket_timeout=5,
+            socket_connect_timeout=5,
+        )
         client.ping()
-        compression = (cfg.get("compression", "zlib") != "none")
-        _CACHE = RedisCache(client, namespace=cfg.get("namespace", DEFAULT_NAMESPACE), default_ttl=int(cfg.get("default_ttl", DEFAULT_TTL)), compression=compression)
+        compression = cfg.get("compression", "zlib")
+        _CACHE = RedisCache(
+            client,
+            namespace=cfg.get("namespace", DEFAULT_NAMESPACE),
+            default_ttl=int(cfg.get("default_ttl", DEFAULT_TTL)),
+            compression_mode=compression,
+        )
         return _CACHE
     except Exception:
         _CACHE = NoopCache(enabled=False, namespace=cfg.get("namespace", DEFAULT_NAMESPACE))
@@ -411,40 +454,76 @@ def get_cache() -> Cache:
     """Zwraca instancję cache (Redis lub Noop)."""
     global _CACHE
     if isinstance(_CACHE, NoopCache) and _CACHE.namespace == DEFAULT_NAMESPACE:
-        # pierwsze wywołanie – spróbuj zainicjalizować
         return _init_cache()
     return _CACHE
 
 # ===========================
-# Dekorator cache’ujący
+# Dekorator cache’ujący (anti-stampede opcjonalny)
 # ===========================
-
 def _default_key_builder(func: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any]) -> str:
     base = f"{func.__module__}.{func.__name__}"
     args_hash = _hash_obj(args, kwargs)
     return f"{base}:{args_hash}"
 
-def cacheable(namespace: Optional[str] = None, ttl: Optional[int] = None, key_builder: Optional[Callable[[Callable[..., Any], Tuple[Any, ...], Dict[str, Any]], str]] = None):
+def cacheable(
+    namespace: Optional[str] = None,
+    ttl: Optional[int] = None,
+    key_builder: Optional[Callable[[Callable[..., Any], Tuple[Any, ...], Dict[str, Any]], str]] = None,
+    *,
+    lock_ms: int = 0,
+    grace_ttl: int = 0,
+):
     """
-    Dekorator cache’ujący wynik funkcji w Redis (jeśli dostępny).
-    - namespace: pod-namesapce dla kluczy (domyślnie z config)
-    - ttl: czas życia klucza w sekundach (domyślnie z config)
-    - key_builder: funkcja budująca klucz na bazie argumentów
+    Dekorator cache’ujący wynik funkcji.
+    - namespace: dodatkowy sub-namespace (doklejany do globalnego)
+    - ttl: czas życia klucza w sekundach
+    - key_builder: funkcja budująca klucz (domyślnie hash args/kwargs)
+    - lock_ms: gdy >0, używa krótkiego locka przy miss (anti-stampede)
+    - grace_ttl: gdy >0 i klucz wygasł — zwraca „stare” dane, a w tle odświeża (best-effort, bez wątku)
+      (tu: jeśli znajdziemy klucz „stale”, oddajemy go zamiast wyliczać; implementacja prosta, bez async)
     """
     def _decorator(func: Callable[..., T]) -> Callable[..., T]:
         def _wrapped(*args: Any, **kwargs: Any) -> T:
             cache = get_cache()
             ns = f"{cache.namespace}:{namespace}" if (namespace and namespace.strip()) else cache.namespace
             kb = key_builder or _default_key_builder
-            k = kb(func, args, kwargs)
-            full_key = f"{ns}:{k}"
+            k_local = kb(func, args, kwargs)
+            full_key = f"{ns}:{k_local}"
+            stale_key = f"{full_key}:stale" if grace_ttl > 0 else None
+
+            # Fast path: hit
             if cache.enabled:
                 hit = cache.get(full_key)
                 if hit is not None:
                     return hit  # type: ignore[return-value]
+                # Spróbuj stale
+                if stale_key:
+                    stale = cache.get(stale_key)
+                    if stale is not None:
+                        # zwróć od razu dane z „grace period”
+                        return stale  # type: ignore[return-value]
+
+            # Miss → opcjonalny lock
+            if cache.enabled and lock_ms > 0:
+                with cache.lock(full_key, ttl_ms=lock_ms, wait_ms=lock_ms, retry_ms=min(200, lock_ms)) as lk:
+                    # Jeszcze raz sprawdź po locku (double check)
+                    if cache.enabled:
+                        hit2 = cache.get(full_key)
+                        if hit2 is not None:
+                            return hit2  # type: ignore[return-value]
+                    result = func(*args, **kwargs)
+                    if cache.enabled:
+                        cache.set(full_key, result, ttl=ttl)
+                        if stale_key:
+                            cache.set(stale_key, result, ttl=grace_ttl)
+                    return result  # type: ignore[return-value]
+
+            # Miss bez locka
             result = func(*args, **kwargs)
             if cache.enabled:
                 cache.set(full_key, result, ttl=ttl)
+                if stale_key:
+                    cache.set(stale_key, result, ttl=grace_ttl)
             return result  # type: ignore[return-value]
         return _wrapped
     return _decorator
@@ -452,10 +531,9 @@ def cacheable(namespace: Optional[str] = None, ttl: Optional[int] = None, key_bu
 # ===========================
 # Publiczny status (kompatybilny podpis)
 # ===========================
-
 def status() -> str:
     """
-    Zwraca zwięzły status cache (kompatybilny z poprzednim placeholderem).
+    Zwraca zwięzły status cache (kompatybilny).
     """
     c = get_cache()
     return c.status()

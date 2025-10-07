@@ -1,6 +1,8 @@
 from __future__ import annotations
+import logging
 import numpy as np
 import pandas as pd
+from typing import Any, Dict, Tuple
 
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
@@ -8,6 +10,72 @@ from sklearn.covariance import EllipticEnvelope
 from sklearn.svm import OneClassSVM
 from sklearn.preprocessing import RobustScaler
 from sklearn.impute import SimpleImputer
+
+# --- logger (bezpieczny, bez duplikatów handlerów) ---
+_LOGGER = logging.getLogger("anomalies")
+if not _LOGGER.handlers:
+    _LOGGER.setLevel(logging.INFO)
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S"))
+    _LOGGER.addHandler(_h)
+    _LOGGER.propagate = False
+
+
+def _mk_empty_result(df: pd.DataFrame, reason: str) -> pd.DataFrame:
+    res = df.copy()
+    res["_anomaly_score"] = np.nan
+    res["_is_anomaly"] = pd.Series(np.zeros(len(df), dtype="int8"), index=df.index).astype("Int8")
+    res.attrs["anomaly_meta"] = {"error": reason, "n_rows": int(len(df))}
+    _LOGGER.warning("anomaly: %s", reason)
+    return res
+
+
+def _minmax01(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return x
+    mn, mx = np.nanmin(x), np.nanmax(x)
+    rng = mx - mn
+    if rng <= 1e-12:
+        return np.zeros_like(x)
+    return (x - mn) / rng
+
+
+def _sanitize_params(n_rows: int,
+                     contamination: float | str,
+                     method: str,
+                     n_neighbors: int,
+                     nu: float) -> Tuple[float | str, int, float, list[str]]:
+    """Koryguje parametry do bezpiecznych zakresów; zwraca (contam, n_neighbors_eff, nu_eff, warnings)."""
+    warns: list[str] = []
+    m = method.lower().strip()
+
+    # contamination
+    contam: float | str = contamination
+    if isinstance(contam, float):
+        if contam <= 0 or contam >= 0.5:
+            warns.append(f"contamination={contam} poza (0,0.5); skorygowałem do 0.05")
+            contam = 0.05
+    else:
+        if m in ("elliptic", "iforest") and contam == "auto":
+            # ok dla IF (>=1.4), dla EE brak 'auto' – użyjemy 0.1
+            if m == "elliptic":
+                warns.append("EllipticEnvelope nie wspiera contamination='auto' → używam 0.1")
+                contam = 0.1
+
+    # n_neighbors
+    nn_eff = max(2, min(n_neighbors, max(2, n_rows - 1)))
+    if m == "lof" and nn_eff != n_neighbors:
+        warns.append(f"n_neighbors skorygowany do {nn_eff} (n_rows={n_rows})")
+
+    # nu
+    nu_eff = nu
+    if m == "ocsvm" and (nu <= 0 or nu >= 1):
+        warns.append(f"nu={nu} poza (0,1); skorygowałem do 0.1")
+        nu_eff = 0.1
+
+    return contam, nn_eff, nu_eff, warns
 
 
 def detect_anomalies(
@@ -21,57 +89,68 @@ def detect_anomalies(
     nu: float = 0.1,                    # dla OCSVM
 ) -> pd.DataFrame:
     """
-    Wykrywa anomalie w danych (kolumny numeryczne).
+    Wykrywa anomalie w danych (kolumny numeryczne) czterema klasykami:
+    IsolationForest | LOF | EllipticEnvelope | OneClassSVM.
+
     Zwraca kopię DataFrame z kolumnami:
-      - `_anomaly_score`  (float; wyższy = normalniejszy dla IF/EE/OCSVM; dla LOF przeskalowane)
-      - `_is_anomaly`     (0/1)
+      - `_anomaly_score`  (float; **wyższy = bardziej normalny**;
+         LOF: min-max do [0,1]; inne: surowy decision_function)
+      - `_is_anomaly`     (0/1; Int8)
 
-    Dodatkowo zapisuje metadane do `res.attrs["anomaly_meta"]`:
-      - method, contamination, n_rows, n_num_cols, n_anomalies, feature_influence (ranking)
+    Dodatkowo zapisuje metadane w `res.attrs["anomaly_meta"]`:
+      - method, contamination, n_rows, n_num_cols, dropped_constant_cols,
+        n_anomalies, feature_influence (ranking Spearmana), scaled, imputer,
+        params (dla danej metody), score_range, warnings, fallback_used.
     """
-    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return df
+    if df is None or not isinstance(df, pd.DataFrame):
+        return _mk_empty_result(pd.DataFrame(), "invalid_dataframe")
 
-    # -------- Wybór + sanity-check kolumn --------
+    if df.empty:
+        return _mk_empty_result(df, "empty_dataframe")
+
+    # --- kolumny numeryczne + sanity ---
     num = df.select_dtypes(include=np.number).copy()
     if num.empty:
-        # brak cech numerycznych — zwróć DataFrame z brakowymi kolumnami wynikowymi
-        res = df.copy()
-        res["_anomaly_score"] = np.nan
-        res["_is_anomaly"] = 0
-        res.attrs["anomaly_meta"] = {"error": "no_numeric_columns"}
-        return res
+        return _mk_empty_result(df, "no_numeric_columns")
 
-    # Usuń kolumny stałe (zerowa wariancja)
+    # Inf → NaN (potem imputacja)
+    num = num.replace([np.inf, -np.inf], np.nan)
+
+    # Usuń kolumny stałe
     constant_cols = [c for c in num.columns if num[c].nunique(dropna=True) <= 1]
     if constant_cols:
         num = num.drop(columns=constant_cols)
 
     if num.empty:
-        res = df.copy()
-        res["_anomaly_score"] = np.nan
-        res["_is_anomaly"] = 0
-        res.attrs["anomaly_meta"] = {"error": "only_constant_columns"}
-        return res
+        return _mk_empty_result(df, "only_constant_columns")
 
-    # -------- Imputacja + (opcjonalnie) skalowanie --------
+    n_rows = len(num)
+    if n_rows < 5:
+        # Zbyt mało obserwacji dla sensownej detekcji
+        return _mk_empty_result(df, f"too_few_rows({n_rows})")
+
+    # --- imputacja + skalowanie ---
     imputer = SimpleImputer(strategy="median")
     X = imputer.fit_transform(num)
 
+    use_scaler = bool(scale or method.lower().strip() in ("lof", "ocsvm"))
     scaler = None
-    if scale or method in ("lof", "ocsvm"):
+    if use_scaler:
         scaler = RobustScaler()
         X = scaler.fit_transform(X)
 
-    # -------- Model --------
-    method = method.lower().strip()
-    clf = None
-    decision_scores = None
-    labels = None
+    # --- param sanity & warnings ---
+    contam_eff, nn_eff, nu_eff, warns = _sanitize_params(n_rows, contamination, method, n_neighbors, nu)
 
-    if method == "iforest":
+    # --- trenowanie modeli + fallback ---
+    m = method.lower().strip()
+    decision_scores: np.ndarray | None = None
+    is_anom: np.ndarray | None = None
+    fallback_used = None
+
+    def _fit_iforest() -> Tuple[np.ndarray, np.ndarray]:
         clf = IsolationForest(
-            contamination=contamination,
+            contamination=contam_eff,  # float lub 'auto'
             random_state=random_state,
             n_estimators=300,
             max_samples="auto",
@@ -79,93 +158,96 @@ def detect_anomalies(
             bootstrap=False,
         )
         clf.fit(X)
-        # decision_function: wyższy = bardziej "normal"
-        decision_scores = clf.decision_function(X)
-        labels = clf.predict(X)  # -1 anomalie, 1 normal
-        is_anom = (labels == -1).astype(int)
+        scores = clf.decision_function(X)  # większy = normalny
+        labels = clf.predict(X)            # -1 anomalia, 1 normal
+        return scores, (labels == -1).astype(int)
 
-    elif method == "lof":
-        # LOF nie ma .decision_function; użyjemy -negative_outlier_factor_ znormalizowanego do ~[0,1]
-        lof = LocalOutlierFactor(
-            n_neighbors=n_neighbors,
-            contamination=contamination if isinstance(contamination, float) else "auto",
-            novelty=False,  # klasyczny LOF tylko do fit_predict
-            n_jobs=-1,
-        )
-        labels = lof.fit_predict(X)  # -1 anomalie
-        is_anom = (labels == -1).astype(int)
-        # Skala wyników: im mniejszy NOF, tym większa anomalia → przekształć na "im wyżej tym normalniejszy"
-        nof = lof.negative_outlier_factor_
-        # przeskaluj do [0, 1] (większy = bardziej normalny)
-        min_nof, max_nof = float(np.min(nof)), float(np.max(nof))
-        rng = max(max_nof - min_nof, 1e-12)
-        decision_scores = (nof - min_nof) / rng
+    try:
+        if m == "iforest":
+            decision_scores, is_anom = _fit_iforest()
 
-        clf = lof  # do metadanych
+        elif m == "lof":
+            lof = LocalOutlierFactor(
+                n_neighbors=nn_eff,
+                contamination=contam_eff if isinstance(contam_eff, float) else "auto",
+                novelty=False,
+                n_jobs=-1,
+            )
+            labels = lof.fit_predict(X)  # -1 anomalia
+            is_anom = (labels == -1).astype(int)
+            nof = lof.negative_outlier_factor_.astype(float)
+            decision_scores = _minmax01(nof)  # większy = normalny (skalowane)
 
-    elif method == "elliptic":
-        ee = EllipticEnvelope(
-            contamination=contamination if isinstance(contamination, float) else 0.1,
-            support_fraction=None,
-            assume_centered=assume_centered,
-            random_state=random_state,
-        )
-        ee.fit(X)
-        # decision_function: wyższy = bardziej "normal"
-        decision_scores = ee.decision_function(X)
-        labels = ee.predict(X)  # -1 anomalie, 1 normal
-        is_anom = (labels == -1).astype(int)
-        clf = ee
+        elif m == "elliptic":
+            ee = EllipticEnvelope(
+                contamination=contam_eff if isinstance(contam_eff, float) else 0.1,
+                support_fraction=None,
+                assume_centered=assume_centered,
+                random_state=random_state,
+            )
+            ee.fit(X)
+            decision_scores = ee.decision_function(X)
+            labels = ee.predict(X)  # -1 anomalia
+            is_anom = (labels == -1).astype(int)
 
-    elif method == "ocsvm":
-        oc = OneClassSVM(
-            kernel="rbf",
-            nu=nu,    # frakcja outlierów upper-bound
-            gamma="scale",
-        )
-        oc.fit(X)
-        decision_scores = oc.decision_function(X)  # wyższy = normalniejszy
-        labels = oc.predict(X)  # -1 anomalie, 1 normal
-        is_anom = (labels == -1).astype(int)
-        clf = oc
+        elif m == "ocsvm":
+            oc = OneClassSVM(kernel="rbf", nu=nu_eff, gamma="scale")
+            oc.fit(X)
+            decision_scores = oc.decision_function(X)
+            labels = oc.predict(X)
+            is_anom = (labels == -1).astype(int)
 
-    else:
-        raise ValueError(f"Nieznana metoda: {method}. Użyj: 'iforest' | 'lof' | 'elliptic' | 'ocsvm'.")
+        else:
+            raise ValueError(f"Nieznana metoda: {method}. Użyj: 'iforest' | 'lof' | 'elliptic' | 'ocsvm'.")
 
-    # -------- Złożenie wyniku --------
+    except Exception as e:
+        # Fallback do IsolationForest (najbardziej odporny)
+        _LOGGER.exception("anomaly: metoda '%s' nie powiodła się, fallback do IsolationForest", method)
+        warns.append(f"fallback_from_{m}_to_iforest: {e}")
+        decision_scores, is_anom = _fit_iforest()
+        fallback_used = "iforest"
+
+    # --- złożenie wyniku ---
     res = df.copy()
     res["_anomaly_score"] = pd.Series(decision_scores, index=num.index)
     res["_is_anomaly"] = pd.Series(is_anom, index=num.index).astype("Int8")
 
-    # -------- Ranking cech (wpływ ≈ korelacja Spearmana ze score) --------
+    # --- wpływ cech (Spearman), na próbce gdy duże dane ---
     try:
-        # Korelacja tylko dla numerycznych, na próbce dla dużych zbiorów
         view = num.copy()
         view["_score"] = res["_anomaly_score"].values
-        if len(view) > 50000:
-            view = view.sample(50000, random_state=42)
+        if len(view) > 50_000:
+            view = view.sample(50_000, random_state=42)
         corr = view.corr(method="spearman")["_score"].drop("_score", errors="ignore").abs().sort_values(ascending=False)
-        feature_influence = corr.to_dict()
+        feature_influence: Dict[str, float] = corr.to_dict()
     except Exception:
-        feature_influence = None
+        feature_influence = {}
 
-    # -------- Metadane --------
-    meta = {
-        "method": method,
+    # --- meta ---
+    score_arr = res["_anomaly_score"].to_numpy(dtype=float)
+    score_range = (
+        float(np.nanmin(score_arr)) if score_arr.size else np.nan,
+        float(np.nanmax(score_arr)) if score_arr.size else np.nan,
+    )
+    meta: Dict[str, Any] = {
+        "method": m if fallback_used is None else f"{m} (fallback→iforest)",
         "contamination": contamination,
         "n_rows": int(len(df)),
         "n_num_cols": int(num.shape[1]),
         "dropped_constant_cols": constant_cols,
         "n_anomalies": int(int(res["_is_anomaly"].sum())),
         "feature_influence": feature_influence,  # dict: kolumna -> |rho|
-        "scaled": bool(scale or method in ("lof", "ocsvm")),
+        "scaled": use_scaler,
         "imputer": "median",
         "random_state": random_state,
+        "score_range": score_range,
         "params": {
-            "n_neighbors": n_neighbors if method == "lof" else None,
-            "assume_centered": assume_centered if method == "elliptic" else None,
-            "nu": nu if method == "ocsvm" else None,
+            "n_neighbors": nn_eff if m == "lof" else None,
+            "assume_centered": assume_centered if m == "elliptic" else None,
+            "nu": nu_eff if m == "ocsvm" else None,
         },
+        "warnings": warns or None,
+        "fallback_used": fallback_used,
     }
     res.attrs["anomaly_meta"] = meta
 

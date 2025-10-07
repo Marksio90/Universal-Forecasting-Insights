@@ -1,10 +1,10 @@
-# src/ml_models/automl_pipeline.py
+# src/ml_models/automl_pipeline.py — TURBO PRO (back-compat API)
 from __future__ import annotations
 import pathlib
 import json
 import time
-import math
 import warnings
+import logging
 from dataclasses import dataclass
 from typing import Tuple, Dict, Any, List, Optional
 
@@ -33,6 +33,18 @@ from lightgbm import LGBMRegressor, LGBMClassifier
 import joblib
 
 # =========================
+# Logger
+# =========================
+LOGGER = logging.getLogger("automl")
+if not LOGGER.handlers:
+    LOGGER.setLevel(logging.INFO)
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                                      datefmt="%Y-%m-%d %H:%M:%S"))
+    LOGGER.addHandler(_h)
+    LOGGER.propagate = False
+
+# =========================
 # Ścieżki i rejestr
 # =========================
 MODELS_DIR = pathlib.Path(__file__).resolve().parents[2] / "models" / "trained_models"
@@ -40,14 +52,11 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REGISTRY = MODELS_DIR / "registry.json"
 
 def _save_registry(entry: dict):
-    if REGISTRY.exists():
-        try:
-            data = json.loads(REGISTRY.read_text(encoding="utf-8"))
-            if not isinstance(data, list):
-                data = []
-        except Exception:
+    try:
+        data = json.loads(REGISTRY.read_text(encoding="utf-8")) if REGISTRY.exists() else []
+        if not isinstance(data, list):
             data = []
-    else:
+    except Exception:
         data = []
     data.append(entry)
     REGISTRY.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -55,14 +64,23 @@ def _save_registry(entry: dict):
 # =========================
 # Utils
 # =========================
+def _validate_df(df: pd.DataFrame, target: str) -> Optional[str]:
+    if df is None or not isinstance(df, pd.DataFrame):
+        return "Nieprawidłowy obiekt danych (brak DataFrame)."
+    if target not in df.columns:
+        return f"Brak kolumny celu: {target!r}."
+    if len(df) < 30:
+        return f"Zbyt mało wierszy do AutoML (len={len(df)} < 30)."
+    if df[target].isna().all():
+        return "Kolumna celu zawiera wyłącznie braki (NaN)."
+    return None
+
 def _is_classification(y: pd.Series) -> bool:
     if y is None or len(y) == 0:
         return False
     nunique = y.nunique(dropna=True)
-    # heurystyka: mała liczba klas → klasyfikacja
     if nunique <= max(20, int(0.05 * len(y))):
         return True
-    # jeżeli typ nienumeryczny → prawdopodobnie klasyfikacja
     if (y.dtype == "object") or pd.api.types.is_categorical_dtype(y):
         return True
     return False
@@ -73,15 +91,17 @@ def _safe_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
 
 def _split_xy(df: pd.DataFrame, target: str, is_classif: bool, random_state: int):
-    y = df[target]
-    X = df.drop(columns=[target])
+    # Odfiltruj brakujące targety
+    df2 = df.dropna(subset=[target]).copy()
+    y = df2[target]
+    X = df2.drop(columns=[target])
     stratify = y if is_classif and y.nunique() > 1 else None
     X_tr, X_te, y_tr, y_te = train_test_split(
         X, y, test_size=0.2, random_state=random_state, stratify=stratify
     )
     return X_tr, X_te, y_tr, y_te
 
-def _column_roles(X: pd.DataFrame, max_onehot: int = 10) -> Dict[str, List[str]]:
+def _column_roles(X: pd.DataFrame, max_onehot: int = 12) -> Dict[str, List[str]]:
     num_cols = list(X.select_dtypes(include=[np.number, "number", "float", "int"]).columns)
     obj_cols = list(X.select_dtypes(include=["object"]).columns)
     cat_low, cat_high = [], []
@@ -93,38 +113,43 @@ def _column_roles(X: pd.DataFrame, max_onehot: int = 10) -> Dict[str, List[str]]
             cat_low.append(c)
         else:
             cat_high.append(c)
-    # Datetime/boolean mogą przypadkiem wpaść w inne typy:
     dt_cols = [c for c in X.columns if pd.api.types.is_datetime64_any_dtype(X[c])]
     bool_cols = list(X.select_dtypes(include=["bool"]).columns)
-    # wyłącz dt/bool z obj gdyby się zdublowało
+    # Usuń duplikaty między grupami
     for c in dt_cols + bool_cols:
-        if c in obj_cols:
-            if c in cat_low: cat_low.remove(c)
-            if c in cat_high: cat_high.remove(c)
+        if c in cat_low: cat_low.remove(c)
+        if c in cat_high: cat_high.remove(c)
     return {"num": num_cols, "cat_low": cat_low, "cat_high": cat_high, "bool": bool_cols, "dt": dt_cols}
 
+def _make_ohe() -> OneHotEncoder:
+    # Zgodność wsteczna (sklearn < 1.2 nie zna sparse_output)
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
 # =========================
-# Wrapper: dekodowanie etykiet
+# Wrapper: dekodowanie etykiet (+obsługa eval_set)
 # =========================
 @dataclass
 class LabelDecodingClassifier(BaseEstimator, ClassifierMixin):
-    """Opakowuje dowolny estimator klasyfikacyjny, aby encode/decode etykiety Y."""
+    """
+    Opakowuje dowolny estimator klasyfikacyjny, aby encode/decode etykiety Y
+    oraz poprawnie przekazywać eval_set (enkoduje y_eval).
+    """
     base_estimator: BaseEstimator
     classes_: Optional[np.ndarray] = None  # po fit
     _fitted: bool = False
 
     def fit(self, X, y, **fit_params):
         y_arr = pd.Series(y)
-        # jeśli y jest już liczbowe i „gęste” od 0..C-1, nie kodujemy
-        needs_encoding = False
-        if not pd.api.types.is_integer_dtype(y_arr) and not pd.api.types.is_bool_dtype(y_arr):
-            needs_encoding = True
-        else:
+        # Czy wymaga enkodowania?
+        needs_encoding = True
+        if pd.api.types.is_integer_dtype(y_arr) or pd.api.types.is_bool_dtype(y_arr):
             vals = sorted(pd.unique(y_arr))
-            needs_encoding = (len(vals) > 0 and (vals[0] != 0 or vals[-1] != len(vals) - 1))
+            needs_encoding = not (len(vals) > 0 and vals[0] == 0 and vals[-1] == len(vals) - 1)
 
         if needs_encoding:
-            # mapowanie klas → 0..C-1
             classes = pd.Index(pd.unique(y_arr)).sort_values()
             mapping = {cls: i for i, cls in enumerate(classes)}
             y_enc = y_arr.map(mapping).astype(int).values
@@ -137,10 +162,24 @@ class LabelDecodingClassifier(BaseEstimator, ClassifierMixin):
             self._mapping = None
             self._inv_mapping = None
 
+        # Obsługa eval_set: przemapuj etykiety eval na encoded
+        if "eval_set" in fit_params and fit_params["eval_set"]:
+            eval_set = fit_params.pop("eval_set")
+            new_eval = []
+            for Xv, yv in eval_set:
+                yv_ser = pd.Series(yv)
+                if self._mapping is not None:
+                    yv_enc = yv_ser.map(self._mapping).astype(int).values
+                else:
+                    yv_enc = yv_ser.astype(int).values
+                new_eval.append((Xv, yv_enc))
+            fit_params["eval_set"] = new_eval
+
         self.base_estimator_ = clone(self.base_estimator)
         self.base_estimator_.fit(X, y_enc, **fit_params)
         self._fitted = True
-        # jeżeli estimator ma feature_importances_, przepnij na wrapper
+
+        # propaguj feature_importances_ jeśli dostępne
         if hasattr(self.base_estimator_, "feature_importances_"):
             self.feature_importances_ = getattr(self.base_estimator_, "feature_importances_")  # type: ignore[attr-defined]
         return self
@@ -149,15 +188,13 @@ class LabelDecodingClassifier(BaseEstimator, ClassifierMixin):
         y_pred_enc = self.base_estimator_.predict(X)
         if getattr(self, "_inv_mapping", None) is None:
             return y_pred_enc
-        # dekoduj do oryginalnych etykiet
         if isinstance(y_pred_enc, (pd.Series, pd.Index)):
             y_pred_enc = y_pred_enc.to_numpy()
         return np.array([self._inv_mapping.get(int(v), v) for v in y_pred_enc])
 
     def predict_proba(self, X):
         if hasattr(self.base_estimator_, "predict_proba"):
-            proba = self.base_estimator_.predict_proba(X)
-            return proba
+            return self.base_estimator_.predict_proba(X)
         raise AttributeError("Base estimator nie wspiera predict_proba")
 
 # =========================
@@ -165,17 +202,19 @@ class LabelDecodingClassifier(BaseEstimator, ClassifierMixin):
 # =========================
 def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple[Any, Dict[str, float], str]:
     """
-    Trenuje kilka kandydatów (LGBM / XGB / RandomForest) i wybiera najlepszy na walidacji.
+    Trenuje kilku kandydatów (LGBM / XGB / RandomForest) i wybiera najlepszy na walidacji.
     Zwraca:
-      - model (sklearn Pipeline; ma atrybut feature_importances_ jeśli dostępny),
+      - model (sklearn Pipeline),
       - metrics (dict),
       - problem_type ("classification"|"regression")
     """
-    assert isinstance(df, pd.DataFrame) and target in df.columns, "Nieprawidłowe dane lub brak kolumny celu."
-
     # Ciszej dla ostrzeżeń z LGBM/XGB
     warnings.filterwarnings("ignore", category=UserWarning)
     warnings.filterwarnings("ignore", category=FutureWarning)
+
+    err = _validate_df(df, target)
+    if err:
+        raise AssertionError(err)
 
     # Typ problemu + split
     y_series = df[target]
@@ -194,7 +233,7 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
     if roles["cat_low"]:
         transformers.append(("cat_low", Pipeline(steps=[
             ("impute", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+            ("onehot", _make_ohe())
         ]), roles["cat_low"]))
 
     if roles["cat_high"]:
@@ -209,20 +248,23 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
             ("ordinal", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
         ]), roles["bool"]))
 
-    # Datetime kolumny – zostawiamy jak są; zakładamy, że FE już wyprodukował *_year, *_month itd.
+    # Datetime kolumny – zakładamy, że FE już wyprodukował *_year, *_month itd.
 
     pre = ColumnTransformer(transformers=transformers, remainder="drop", verbose_feature_names_out=False)
+
+    # Przygotuj *eval_set* w tej samej przestrzeni cech (ważne dla early stopping)
+    # Używamy klona preprocesora dopasowanego na train:
+    pre_for_eval = clone(pre).fit(X_train, y_train)
+    X_val_trans = pre_for_eval.transform(X_test)
 
     # Kandydaci
     candidates: List[Tuple[str, Any, Dict[str, Any]]] = []
 
     if is_classif:
-        # Wsparcie nierównowagi klas (binarka)
+        # wsparcie nierównowagi (binarka)
         n_classes = int(pd.Series(y_train).nunique())
         if n_classes == 2:
             cls_counts = pd.Series(y_train).value_counts()
-            pos = cls_counts.idxmin()
-            neg = cls_counts.idxmax()
             n_pos, n_neg = float(cls_counts.min()), float(cls_counts.max())
             scale_pos_weight = (n_neg / max(n_pos, 1.0))
         else:
@@ -231,18 +273,17 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
         candidates = [
             ("lgbm", LabelDecodingClassifier(LGBMClassifier(
                 random_state=random_state,
-                n_estimators=1000,
+                n_estimators=1200,
                 learning_rate=0.05,
                 num_leaves=63,
                 subsample=0.9,
                 colsample_bytree=0.9,
                 n_jobs=-1,
                 class_weight="balanced" if n_classes > 2 else None,
-                # dla binarki włączamy is_unbalance automatycznie przez class_weight/scale
-            )), {"model__early_stopping_rounds": 50}),
+            )), {"model__eval_set": [(X_val_trans, y_test)], "model__early_stopping_rounds": 80}),
             ("xgb", LabelDecodingClassifier(XGBClassifier(
                 random_state=random_state,
-                n_estimators=2000,
+                n_estimators=2500,
                 learning_rate=0.03,
                 max_depth=8,
                 subsample=0.9,
@@ -251,10 +292,10 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
                 eval_metric="logloss",
                 n_jobs=-1,
                 scale_pos_weight=scale_pos_weight if n_classes == 2 else 1.0,
-            )), {"model__early_stopping_rounds": 100}),
+            )), {"model__eval_set": [(X_val_trans, y_test)], "model__early_stopping_rounds": 120}),
             ("rf", LabelDecodingClassifier(RandomForestClassifier(
                 random_state=random_state,
-                n_estimators=600,
+                n_estimators=700,
                 max_depth=None,
                 n_jobs=-1,
                 class_weight="balanced_subsample"
@@ -265,26 +306,26 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
         candidates = [
             ("lgbm", LGBMRegressor(
                 random_state=random_state,
-                n_estimators=1000,
+                n_estimators=1500,
                 learning_rate=0.05,
                 num_leaves=63,
                 subsample=0.9,
                 colsample_bytree=0.9,
                 n_jobs=-1,
-            ), {"model__early_stopping_rounds": 50}),
+            ), {"model__eval_set": [(X_val_trans, y_test)], "model__early_stopping_rounds": 80}),
             ("xgb", XGBRegressor(
                 random_state=random_state,
-                n_estimators=2000,
+                n_estimators=3000,
                 learning_rate=0.03,
                 max_depth=8,
                 subsample=0.9,
                 colsample_bytree=0.9,
                 tree_method="hist",
                 n_jobs=-1,
-            ), {"model__early_stopping_rounds": 100}),
+            ), {"model__eval_set": [(X_val_trans, y_test)], "model__early_stopping_rounds": 120}),
             ("rf", RandomForestRegressor(
                 random_state=random_state,
-                n_estimators=600,
+                n_estimators=700,
                 max_depth=None,
                 n_jobs=-1,
             ), {}),
@@ -301,22 +342,16 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
             ("model", est),
         ])
 
-        # early stopping (jeśli wspierane)
         fit_kwargs = {}
         if fit_params:
-            # przekaż walidację do estymatora
-            fit_kwargs.update({
-                "model__eval_set": [(pre.fit_transform(X_test, y_test),  # uwaga: transformujemy eval X
-                                     pd.Series(y_test).map(getattr(pipe.named_steps["model"], "_mapping", None)).fillna(y_test).astype(int)
-                                     if isinstance(pipe.named_steps["model"], LabelDecodingClassifier) and getattr(pipe.named_steps["model"], "_mapping", None)
-                                     else y_test)]
-            })
+            # przekazujemy eval_set z *transformowanym* X (X_val_trans)
             fit_kwargs.update(fit_params)
 
         try:
             pipe.fit(X_train, y_train, **fit_kwargs)
-        except Exception:
+        except Exception as e:
             # jeżeli fit z early stoppingiem się nie uda, spróbuj bez
+            LOGGER.warning("fit '%s' z early stopping nie powiódł się (%s) – próbuję bez", name, e)
             pipe = Pipeline(steps=[("pre", pre), ("model", est)])
             pipe.fit(X_train, y_train)
 
@@ -324,43 +359,41 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
         y_pred = pipe.predict(X_test)
 
         if problem_type == "classification":
-            # metryki
             acc = float(accuracy_score(y_test, y_pred))
             bacc = float(balanced_accuracy_score(y_test, y_pred))
             f1w = float(f1_score(y_test, y_pred, average="weighted"))
             score = f1w  # metryka wyboru
+
             # AUC dla binarki (jeśli dostępne proby)
             try:
                 y_proba = pipe.predict_proba(X_test)
-                if isinstance(y_proba, list) or isinstance(y_proba, tuple):
-                    y_proba = y_proba[-1]
-                if y_proba.ndim == 2 and y_proba.shape[1] == 2:
-                    # Uwaga: jeśli y są stringami, roc_auc_score je przyjmie tylko z binarną mapą
+                proba = y_proba[:, 1] if (hasattr(y_proba, "shape") and y_proba.ndim == 2 and y_proba.shape[1] == 2) else None
+                if proba is not None:
                     y_true_bin = pd.Series(y_test)
                     if not pd.api.types.is_integer_dtype(y_true_bin):
-                        # zamapuj do 0/1 względem „większej” klasy
                         classes = pd.Index(pd.unique(y_true_bin)).sort_values()
                         mapping = {cls: i for i, cls in enumerate(classes)}
                         y_true_bin = y_true_bin.map(mapping).astype(int)
-                    auc = float(roc_auc_score(y_true_bin, y_proba[:, 1]))
+                    auc = float(roc_auc_score(y_true_bin, proba))
                 else:
                     auc = float("nan")
             except Exception:
                 auc = float("nan")
+
             metrics = {"accuracy": acc, "balanced_accuracy": bacc, "f1_weighted": f1w, "roc_auc": auc}
+
         else:
-            # regresja
             y_true = np.asarray(y_test).astype(float)
             y_hat = np.asarray(y_pred).astype(float)
             rmse = float(mean_squared_error(y_true, y_hat, squared=False))
             mae = float(mean_absolute_error(y_true, y_hat))
             r2 = float(r2_score(y_true, y_hat))
             mape = _safe_mape(y_true, y_hat)
-            # Im niższe RMSE tym lepiej → score ujemny RMSE
             score = -rmse
             metrics = {"rmse": rmse, "mae": mae, "r2": r2, "mape": mape}
 
-        # wybór najlepszego
+        LOGGER.info("candidate '%s' -> score=%.5f metrics=%s", name, score, metrics)
+
         if score > best_score:
             best_name, best_pipe, best_score = name, pipe, score
             holdout_metrics = metrics
@@ -372,6 +405,8 @@ def train_automl(df: pd.DataFrame, target: str, random_state: int = 42) -> Tuple
         base = best_pipe.named_steps["model"]
         if hasattr(base, "feature_importances_"):
             setattr(best_pipe, "feature_importances_", getattr(base, "feature_importances_"))
+        elif hasattr(base, "base_estimator_") and hasattr(base.base_estimator_, "feature_importances_"):
+            setattr(best_pipe, "feature_importances_", getattr(base.base_estimator_, "feature_importances_"))
     except Exception:
         pass
 

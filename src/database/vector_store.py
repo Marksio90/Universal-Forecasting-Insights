@@ -1,10 +1,13 @@
-# src/database/vector_store.py
+# src/database/vector_store.py — TURBO PRO (back-compat)
 from __future__ import annotations
 import os
 import time
 import json
+import math
+import hashlib
 import pathlib
 import uuid
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -20,7 +23,17 @@ except Exception:
 try:
     from src.ai_engine.openai_integrator import get_client
 except Exception:  # fallback if path differs
-    from ai_engine.openai_integrator import get_client  # type: ignore
+    try:
+        from ai_engine.openai_integrator import get_client  # type: ignore
+    except Exception:
+        get_client = None  # type: ignore
+
+# --- tiktoken (opcjonalnie, do lepszego chunkowania) ---
+try:
+    import tiktoken  # type: ignore
+    _TIKTOKEN = True
+except Exception:
+    _TIKTOKEN = False
 
 # --- Chroma (required by requirements.txt) ---
 try:
@@ -34,20 +47,63 @@ except Exception:
 # --- Pinecone (optional) ---
 _PINECONE_AVAILABLE = False
 try:
-    # new SDK
-    import pinecone  # type: ignore
+    import pinecone  # type: ignore  # v3+
     _PINECONE_AVAILABLE = True
 except Exception:
     try:
-        from pinecone import Pinecone  # type: ignore
+        from pinecone import Pinecone  # type: ignore  # legacy shim name
         _PINECONE_AVAILABLE = True
     except Exception:
         _PINECONE_AVAILABLE = False
 
 
 # =========================================
+# Logger
+# =========================================
+def _get_logger(name: str = "vector_store", level: int = logging.INFO) -> logging.Logger:
+    log = logging.getLogger(name)
+    if not log.handlers:
+        log.setLevel(level)
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                                         datefmt="%Y-%m-%d %H:%M:%S"))
+        log.addHandler(h)
+        log.propagate = False
+    return log
+
+LOGGER = _get_logger()
+
+
+# =========================================
 # Konfiguracja
 # =========================================
+
+@dataclass(frozen=True)
+class VSOptions:
+    enabled: bool = False
+    backend: str = "chroma"                 # "chroma" | "pinecone"
+    collection: str = "default"
+    persist_dir: str = "data/vector_store"
+    namespace: str = "intelligent-predictor"
+    metric: str = "cosine"                  # "cosine" | "dotproduct" | "euclidean"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 1536               # 1536(small) / 3072(large)
+    batch_size: int = 128
+
+    # PRO: dodatkowe ficzery (opcjonalne)
+    # id & dedupe
+    id_strategy: str = "uuid"               # "uuid" | "hash"
+    deduplicate: bool = False               # jeżeli True i id_strategy="hash" — pomija duplikaty
+    # chunking
+    chunk_long: bool = True
+    max_chunk_tokens: int = 7500            # ~dla text-embedding-3-*
+    chunk_overlap_tokens: int = 200
+    # pinecone
+    pinecone_index: Optional[str] = None
+    pinecone_api_key: Optional[str] = None
+    pinecone_environment: Optional[str] = None  # legacy
+    pinecone_cloud: Optional[str] = None        # nowsze (np. "us-east-1-aws")
+
 
 def _load_vs_config() -> Dict[str, Any]:
     """
@@ -58,19 +114,25 @@ def _load_vs_config() -> Dict[str, Any]:
     """
     cfg: Dict[str, Any] = {
         "enabled": False,
-        "backend": "chroma",             # "chroma" | "pinecone"
+        "backend": "chroma",
         "collection": "default",
         "persist_dir": "data/vector_store",
         "namespace": "intelligent-predictor",
-        "metric": "cosine",              # "cosine" | "dotproduct" | "euclidean"
+        "metric": "cosine",
         "embedding_model": "text-embedding-3-small",
-        "embedding_dim": 1536,           # OPENAI dims: 1536(small) / 3072(large)
+        "embedding_dim": 1536,
         "batch_size": 128,
-        # Pinecone specyficzne:
+        # PRO:
+        "id_strategy": "uuid",
+        "deduplicate": False,
+        "chunk_long": True,
+        "max_chunk_tokens": 7500,
+        "chunk_overlap_tokens": 200,
+        # Pinecone:
         "pinecone_index": None,
         "pinecone_api_key": None,
-        "pinecone_environment": None,    # dla starszych instalacji
-        "pinecone_cloud": None,          # dla nowszych (us-east-1-aws itp.)
+        "pinecone_environment": None,
+        "pinecone_cloud": None,
     }
 
     # config.yaml
@@ -80,7 +142,9 @@ def _load_vs_config() -> Dict[str, Any]:
             raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
             vs = raw.get("vector_store") or {}
             if isinstance(vs, dict):
-                cfg.update({k: vs.get(k, cfg[k]) for k in cfg.keys() if k in vs})
+                for k in cfg.keys():
+                    if k in vs:
+                        cfg[k] = vs[k]
     except Exception:
         pass
 
@@ -88,7 +152,7 @@ def _load_vs_config() -> Dict[str, Any]:
     if st is not None:
         try:
             s = st.secrets.get("vector_store", {})  # type: ignore[attr-defined]
-            if s:
+            if s and isinstance(s, dict):
                 for k in cfg.keys():
                     if k in s:
                         cfg[k] = s[k]
@@ -106,6 +170,13 @@ def _load_vs_config() -> Dict[str, Any]:
         "embedding_model": ("OPENAI_EMBED_MODEL", str),
         "embedding_dim": ("OPENAI_EMBED_DIM", int),
         "batch_size": ("VECTOR_BATCH_SIZE", int),
+        # PRO:
+        "id_strategy": ("VECTOR_ID_STRATEGY", str),
+        "deduplicate": ("VECTOR_DEDUPLICATE", lambda v: v.lower() in ("1", "true", "yes")),
+        "chunk_long": ("VECTOR_CHUNK_LONG", lambda v: v.lower() in ("1", "true", "yes")),
+        "max_chunk_tokens": ("VECTOR_MAX_CHUNK_TOKENS", int),
+        "chunk_overlap_tokens": ("VECTOR_CHUNK_OVERLAP", int),
+        # Pinecone:
         "pinecone_index": ("PINECONE_INDEX", str),
         "pinecone_api_key": ("PINECONE_API_KEY", str),
         "pinecone_environment": ("PINECONE_ENVIRONMENT", str),
@@ -126,31 +197,97 @@ def _load_vs_config() -> Dict[str, Any]:
 # Embeddings
 # =========================================
 
+def _hash_text(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+def _token_len(s: str, model_hint: str) -> int:
+    if not _TIKTOKEN:
+        # przybliżenie: 1 token ~ 4 znaki
+        return max(1, math.ceil(len(s) / 4))
+    try:
+        enc = tiktoken.encoding_for_model(model_hint)  # type: ignore
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")  # type: ignore
+    return len(enc.encode(s))  # type: ignore
+
+def _chunk_text(s: str, max_tokens: int, overlap: int, model_hint: str) -> List[str]:
+    if not s:
+        return []
+    if not _TIKTOKEN:
+        # fallback po znakach (mniej precyzyjnie)
+        approx_char = max_tokens * 4
+        ov_char = max(0, overlap * 4)
+        if len(s) <= approx_char:
+            return [s]
+        chunks = []
+        start = 0
+        while start < len(s):
+            end = min(len(s), start + approx_char)
+            chunks.append(s[start:end])
+            if end == len(s):
+                break
+            start = max(0, end - ov_char)
+        return chunks
+
+    # Dokładniejsze chunkowanie tokenowe
+    try:
+        enc = tiktoken.encoding_for_model(model_hint)  # type: ignore
+    except Exception:
+        enc = tiktoken.get_encoding("cl100k_base")  # type: ignore
+    toks = enc.encode(s)  # type: ignore
+    if len(toks) <= max_tokens:
+        return [s]
+    chunks = []
+    start = 0
+    while start < len(toks):
+        end = min(len(toks), start + max_tokens)
+        chunk = enc.decode(toks[start:end])  # type: ignore
+        chunks.append(chunk)
+        if end == len(toks):
+            break
+        start = max(0, end - overlap)
+    return chunks
+
+
 class _OpenAIEmbeddingFn:
-    """Prosty batchowy wrapper na OpenAI embeddings API."""
+    """Batchowy wrapper na OpenAI embeddings API z retry/backoff."""
 
     def __init__(self, model: str, batch_size: int = 128):
         self.model = model
-        self.batch_size = batch_size
+        self.batch_size = max(1, int(batch_size))
 
     def embed(self, texts: List[str]) -> List[List[float]]:
+        if get_client is None:
+            raise RuntimeError("Brak integratora OpenAI (get_client).")
         client = get_client()
         if client is None:
             raise RuntimeError("Brak klucza OpenAI dla embeddings.")
+
         out: List[List[float]] = []
         for i in range(0, len(texts), self.batch_size):
             chunk = texts[i : i + self.batch_size]
-            resp = client.embeddings.create(model=self.model, input=chunk)
-            out.extend([d.embedding for d in resp.data])
+            # retry z backoffem
+            delay = 0.75
+            last_err = None
+            for attempt in range(4):
+                try:
+                    resp = client.embeddings.create(model=self.model, input=chunk)
+                    out.extend([d.embedding for d in resp.data])
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(delay)
+                    delay *= 2.0
+            if last_err:
+                raise RuntimeError(f"OpenAI embeddings failed after retries: {last_err}")
         return out
 
 
 class _ChromaEmbeddingAdapter(ChromaEmbeddingFunction):  # type: ignore
     """Adapter EmbeddingFunction dla Chroma."""
-
     def __init__(self, model: str, batch_size: int = 128):
         self._emb = _OpenAIEmbeddingFn(model=model, batch_size=batch_size)
-
     def __call__(self, docs: Documents) -> Embeddings:  # type: ignore[override]
         if not docs:
             return []
@@ -164,44 +301,17 @@ class _ChromaEmbeddingAdapter(ChromaEmbeddingFunction):  # type: ignore
 
 class VectorStoreProtocol:
     enabled: bool
-
-    def upsert_texts(
-        self,
-        texts: List[str],
-        ids: Optional[List[str]] = None,
-        metadatas: Optional[List[Dict[str, Any]]] = None,
-        namespace: Optional[str] = None,
-    ) -> List[str]:
-        raise NotImplementedError
-
-    def query(
-        self,
-        text_or_texts: Union[str, List[str]],
-        top_k: int = 5,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
-        raise NotImplementedError
-
-    def delete(
-        self,
-        ids: Optional[List[str]] = None,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        raise NotImplementedError
-
-    def persist(self) -> None:
-        pass
-
-    def flush(self) -> int:
-        return 0
-
-    def status(self) -> str:
-        return "Vector store disabled."
-
-    def close(self) -> None:
-        pass
+    def upsert_texts(self, texts: List[str], ids: Optional[List[str]] = None,
+                     metadatas: Optional[List[Dict[str, Any]]] = None,
+                     namespace: Optional[str] = None) -> List[str]: ...
+    def query(self, text_or_texts: Union[str, List[str]], top_k: int = 5,
+              namespace: Optional[str] = None, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]: ...
+    def delete(self, ids: Optional[List[str]] = None, namespace: Optional[str] = None,
+               where: Optional[Dict[str, Any]] = None) -> int: ...
+    def persist(self) -> None: ...
+    def flush(self) -> int: ...
+    def status(self) -> str: ...
+    def close(self) -> None: ...
 
 
 @dataclass
@@ -211,15 +321,18 @@ class NoopVectorStore(VectorStoreProtocol):
 
     def upsert_texts(self, texts: List[str], ids=None, metadatas=None, namespace=None) -> List[str]:
         return [ids[i] if ids and i < len(ids) else f"noop-{i}" for i in range(len(texts))]
-
     def query(self, text_or_texts, top_k=5, namespace=None, where=None) -> List[Dict[str, Any]]:
         return []
-
     def delete(self, ids=None, namespace=None, where=None) -> int:
         return 0
-
     def status(self) -> str:
         return self.reason
+    def persist(self) -> None:  # pragma: no cover
+        pass
+    def flush(self) -> int:  # pragma: no cover
+        return 0
+    def close(self) -> None:  # pragma: no cover
+        pass
 
 
 # =========================================
@@ -227,112 +340,147 @@ class NoopVectorStore(VectorStoreProtocol):
 # =========================================
 
 class ChromaVectorStore(VectorStoreProtocol):
-    def __init__(
-        self,
-        collection: str,
-        persist_dir: str,
-        metric: str,
-        embed_model: str,
-        batch_size: int,
-        namespace: str,
-    ):
+    def __init__(self, opts: VSOptions):
         if not CHROMA_AVAILABLE:
             raise RuntimeError("chromadb nie jest zainstalowane.")
         self.enabled = True
-        self.collection_name = collection
-        self.persist_dir = persist_dir
-        self.metric = metric
-        self.namespace = namespace
-        pathlib.Path(persist_dir).mkdir(parents=True, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=persist_dir)
-        self.embedder = _ChromaEmbeddingAdapter(model=embed_model, batch_size=batch_size)
+        self.opts = opts
+        pathlib.Path(opts.persist_dir).mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=opts.persist_dir)
+        self.embedder = _ChromaEmbeddingAdapter(model=opts.embedding_model, batch_size=opts.batch_size)
         self.collection = self.client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": metric},
+            name=opts.collection,
+            metadata={"hnsw:space": opts.metric},
             embedding_function=self.embedder,
         )
 
-    def _ns(self, namespace: Optional[str]) -> Dict[str, Any]:
-        ns = namespace or self.namespace
-        # Chroma nie ma natywnego namespace; dodamy do metadanych filtr "ns"
-        return {"ns": ns}
+    def _ns_meta(self, namespace: Optional[str]) -> Dict[str, Any]:
+        return {"ns": (namespace or self.opts.namespace)}
 
-    def upsert_texts(
-        self,
-        texts: List[str],
-        ids: Optional[List[str]] = None,
-        metadatas: Optional[List[Dict[str, Any]]] = None,
-        namespace: Optional[str] = None,
-    ) -> List[str]:
+    def _gen_id(self, txt: str) -> str:
+        if self.opts.id_strategy == "hash":
+            return _hash_text(txt)
+        return uuid.uuid4().hex
+
+    def _prep_texts(self, texts: List[str]) -> List[Tuple[str, str, int, int]]:
+        """
+        Zwraca listę (text, parent_id, chunk_id, order).
+        Gdy chunkowanie wyłączone — jeden chunk per text (order=0).
+        """
+        items: List[Tuple[str, str, int, int]] = []
+        for t in texts:
+            parent_id = self._gen_id(t)
+            if not self.opts.chunk_long:
+                items.append((t, parent_id, 0, 0))
+                continue
+            chunks = _chunk_text(
+                t,
+                max_tokens=max(200, self.opts.max_chunk_tokens),
+                overlap=max(0, self.opts.chunk_overlap_tokens),
+                model_hint=self.opts.embedding_model,
+            )
+            for idx, ch in enumerate(chunks):
+                items.append((ch, parent_id, idx, idx))
+        return items
+
+    def upsert_texts(self, texts: List[str], ids: Optional[List[str]] = None,
+                     metadatas: Optional[List[Dict[str, Any]]] = None,
+                     namespace: Optional[str] = None) -> List[str]:
         if not texts:
             return []
-        ids = ids or [uuid.uuid4().hex for _ in texts]
-        base_meta = self._ns(namespace)
-        metas = metadatas or [{} for _ in texts]
-        metas = [{**base_meta, **(m or {})} for m in metas]
-        self.collection.upsert(documents=texts, ids=ids, metadatas=metas)
-        return ids
+        # Przygotuj chunki + metadane
+        prepared = self._prep_texts(texts)
+        base_meta = self._ns_meta(namespace)
+        metas_in = metadatas or [{} for _ in texts]
+        out_ids: List[str] = []
 
-    def query(
-        self,
-        text_or_texts: Union[str, List[str]],
-        top_k: int = 5,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        # Jeżeli caller podał ręczne `ids` — przypisz je do parentów
+        parent_ids: List[str] = ids if ids else [None] * len(texts)  # type: ignore
+        parent_idx = 0
+
+        docs: List[str] = []
+        ids_final: List[str] = []
+        metas_final: List[Dict[str, Any]] = []
+
+        for (chunk_text, parent_hash, chunk_id, order) in prepared:
+            # parent_id: preferuj dostarczone ID użytkownika (sekwencyjnie do tekstów)
+            par = parent_ids[parent_idx] if parent_idx < len(parent_ids) and parent_ids[parent_idx] else parent_hash
+            if order == 0:
+                # pierwszy chunk nowego tekstu → przesuwamy indeks rodzica
+                parent_idx += 1
+                out_ids.append(par)
+            # identyfikator chunku (stabilny)
+            cid = f"{par}__{chunk_id}"
+            meta_user = metas_in[min(parent_idx-1, len(metas_in)-1)] if metas_in else {}
+            metas_final.append({**base_meta, **(meta_user or {}), "parent_id": par, "chunk_id": chunk_id, "order": order})
+            ids_final.append(cid)
+            docs.append(chunk_text)
+
+        # deduplikacja (dla strategii hash): nie wrzucaj chunków o takich samych ID
+        if self.opts.deduplicate:
+            seen = set()
+            uniq_docs, uniq_ids, uniq_meta = [], [], []
+            for d, i, m in zip(docs, ids_final, metas_final):
+                if i in seen:
+                    continue
+                seen.add(i)
+                uniq_docs.append(d)
+                uniq_ids.append(i)
+                uniq_meta.append(m)
+            docs, ids_final, metas_final = uniq_docs, uniq_ids, uniq_meta
+
+        self.collection.upsert(documents=docs, ids=ids_final, metadatas=metas_final)
+        return out_ids
+
+    def query(self, text_or_texts: Union[str, List[str]], top_k: int = 5,
+              namespace: Optional[str] = None, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         queries = [text_or_texts] if isinstance(text_or_texts, str) else text_or_texts
-        filt = {**self._ns(namespace), **(where or {})}
+        filt = {**self._ns_meta(namespace), **(where or {})}
         res = self.collection.query(query_texts=queries, n_results=top_k, where=filt)
-        # Chroma zwraca tablice wyników per zapytanie
         results: List[Dict[str, Any]] = []
-        for i in range(len(res.get("ids", []))):
-            for j, _id in enumerate(res["ids"][i]):
+        ids = res.get("ids") or []
+        for i in range(len(ids)):
+            for j, _id in enumerate(ids[i]):
                 results.append(
                     {
                         "id": _id,
-                        "text": (res["documents"][i][j] if res.get("documents") else None),
-                        "score": res["distances"][i][j] if res.get("distances") else None,
-                        "metadata": res["metadatas"][i][j] if res.get("metadatas") else None,
+                        "text": (res.get("documents", [[]])[i][j] if res.get("documents") else None),
+                        "score": (res.get("distances", [[]])[i][j] if res.get("distances") else None),
+                        "metadata": (res.get("metadatas", [[]])[i][j] if res.get("metadatas") else None),
                     }
                 )
         return results
 
-    def delete(
-        self,
-        ids: Optional[List[str]] = None,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        filt = {**self._ns(namespace), **(where or {})}
-        # Chroma: delete returns None; nie ma liczby skasowanych -> zwrócimy -1 gdy unknown
+    def delete(self, ids: Optional[List[str]] = None, namespace: Optional[str] = None,
+               where: Optional[Dict[str, Any]] = None) -> int:
+        filt = {**self._ns_meta(namespace), **(where or {})}
         self.collection.delete(ids=ids, where=filt if filt else None)
+        # Chroma nie zwraca count — sygnalizujemy -1
         return -1
 
     def persist(self) -> None:
-        # PersistentClient zapisuje automatycznie; zostawiamy hook
         try:
             self.client.persist()
         except Exception:
             pass
 
     def flush(self) -> int:
-        # Brak natywnego flush kolekcji; można skasować i odtworzyć
         try:
-            count = -1
-            self.client.delete_collection(self.collection_name)
+            self.client.delete_collection(self.opts.collection)
             self.collection = self.client.get_or_create_collection(
-                name=self.collection_name,
-                metadata={"hnsw:space": self.metric},
+                name=self.opts.collection,
+                metadata={"hnsw:space": self.opts.metric},
                 embedding_function=self.embedder,
             )
-            return count
+            return -1
         except Exception:
             return 0
 
     def status(self) -> str:
         try:
             n = self.collection.count()
-            return f"ChromaDB enabled • collection={self.collection_name} • count={n} • persist_dir={self.persist_dir}"
+            return (f"ChromaDB enabled • collection={self.opts.collection} • count={n} "
+                    f"• persist_dir={self.opts.persist_dir} • model={self.opts.embedding_model}")
         except Exception as e:
             return f"ChromaDB error: {e}"
 
@@ -348,36 +496,21 @@ class ChromaVectorStore(VectorStoreProtocol):
 # =========================================
 
 class PineconeVectorStore(VectorStoreProtocol):
-    def __init__(
-        self,
-        index_name: str,
-        api_key: str,
-        metric: str,
-        embed_model: str,
-        batch_size: int,
-        namespace: str,
-        environment: Optional[str] = None,
-        cloud: Optional[str] = None,
-        embedding_dim: Optional[int] = 1536,
-    ):
+    def __init__(self, opts: VSOptions):
         if not _PINECONE_AVAILABLE:
             raise RuntimeError("Pinecone SDK nie jest zainstalowany.")
         self.enabled = True
-        self.index_name = index_name
-        self.namespace = namespace
-        self.metric = metric
-        self.batch_size = batch_size
-        self.embedder = _OpenAIEmbeddingFn(model=embed_model, batch_size=batch_size)
-        self.embedding_dim = int(embedding_dim or 1536)
+        self.opts = opts
+        self.embedder = _OpenAIEmbeddingFn(model=opts.embedding_model, batch_size=opts.batch_size)
 
-        # Inicjalizacja
+        # Inicjalizacja klienta
         try:
-            # nowe SDK
             if hasattr(pinecone, "Pinecone"):
-                pc = pinecone.Pinecone(api_key=api_key)  # type: ignore[attr-defined]
+                pc = pinecone.Pinecone(api_key=(opts.pinecone_api_key or os.getenv("PINECONE_API_KEY")))  # type: ignore[attr-defined]
                 self.pc = pc
             else:
-                pinecone.init(api_key=api_key, environment=environment or cloud)  # type: ignore
+                pinecone.init(api_key=(opts.pinecone_api_key or os.getenv("PINECONE_API_KEY")),
+                              environment=opts.pinecone_environment or opts.pinecone_cloud)  # type: ignore
                 self.pc = pinecone  # type: ignore
         except Exception as e:
             raise RuntimeError(f"Pinecone init error: {e}")
@@ -390,88 +523,120 @@ class PineconeVectorStore(VectorStoreProtocol):
                 names = [i.name for i in self.pc.list_indexes().indexes]  # type: ignore[attr-defined]
         except Exception:
             names = []
-        if self.index_name not in names:
-            # spróbuj utworzyć (wymaga uprawnień)
+        if not opts.pinecone_index:
+            raise RuntimeError("Brak nazwy indeksu Pinecone (pinecone_index).")
+        if opts.pinecone_index not in names:
             try:
                 if hasattr(self.pc, "create_index"):
                     self.pc.create_index(  # type: ignore[attr-defined]
-                        name=self.index_name,
-                        dimension=self.embedding_dim,
-                        metric=self.metric if self.metric != "cosine" else "cosine",
+                        name=opts.pinecone_index,
+                        dimension=int(opts.embedding_dim),
+                        metric=opts.metric if opts.metric != "cosine" else "cosine",
                     )
                 else:
-                    self.pc.create_index(name=self.index_name, dimension=self.embedding_dim, metric=self.metric)
-            except Exception:
-                # pomiń – może istnieje już na innym projekcie
-                pass
+                    self.pc.create_index(name=opts.pinecone_index, dimension=int(opts.embedding_dim), metric=opts.metric)
+            except Exception as e:
+                LOGGER.warning("Pinecone create_index failed (może istnieć lub brak uprawnień): %s", e)
 
-        # Pobierz uchwyt do indeksu
+        # Uchwyt do indeksu
         if hasattr(self.pc, "Index"):
-            self.index = self.pc.Index(self.index_name)  # type: ignore[attr-defined]
+            self.index = self.pc.Index(opts.pinecone_index)  # type: ignore[attr-defined]
         else:
-            self.index = pinecone.Index(self.index_name)  # type: ignore
+            self.index = pinecone.Index(opts.pinecone_index)  # type: ignore
 
     def _ns(self, namespace: Optional[str]) -> str:
-        return namespace or self.namespace
+        return namespace or self.opts.namespace
 
-    def upsert_texts(
-        self,
-        texts: List[str],
-        ids: Optional[List[str]] = None,
-        metadatas: Optional[List[Dict[str, Any]]] = None,
-        namespace: Optional[str] = None,
-    ) -> List[str]:
+    def _prep_texts(self, texts: List[str]) -> List[Tuple[str, str, int, int]]:
+        items: List[Tuple[str, str, int, int]] = []
+        for t in texts:
+            parent_id = uuid.uuid4().hex if self.opts.id_strategy != "hash" else _hash_text(t)
+            if not self.opts.chunk_long:
+                items.append((t, parent_id, 0, 0))
+                continue
+            chunks = _chunk_text(
+                t,
+                max_tokens=max(200, self.opts.max_chunk_tokens),
+                overlap=max(0, self.opts.chunk_overlap_tokens),
+                model_hint=self.opts.embedding_model,
+            )
+            for idx, ch in enumerate(chunks):
+                items.append((ch, parent_id, idx, idx))
+        return items
+
+    def upsert_texts(self, texts: List[str], ids: Optional[List[str]] = None,
+                     metadatas: Optional[List[Dict[str, Any]]] = None,
+                     namespace: Optional[str] = None) -> List[str]:
         if not texts:
             return []
-        ids = ids or [uuid.uuid4().hex for _ in texts]
-        embs = self.embedder.embed(texts)
+
+        prepared = self._prep_texts(texts)
+        # embed w batchach
+        chunk_texts = [t for (t, _, _, _) in prepared]
+        embs = self.embedder.embed(chunk_texts)
+
+        metas_in = metadatas or [{} for _ in texts]
+        ns = self._ns(namespace)
+
         vectors = []
-        metas = metadatas or [{} for _ in texts]
-        for _id, vec, m, txt in zip(ids, embs, metas, texts):
-            item = {"id": _id, "values": vec, "metadata": {**(m or {}), "text": txt}}
-            vectors.append(item)
+        out_parent_ids: List[str] = []
+        parent_ids_given = ids if ids else [None] * len(texts)  # type: ignore
+        parent_idx = 0
 
-        self.index.upsert(vectors=vectors, namespace=self._ns(namespace))
-        return ids
+        for (chunk_text, parent_hash, chunk_id, order), vec in zip(prepared, embs):
+            par = parent_ids_given[parent_idx] if parent_idx < len(parent_ids_given) and parent_ids_given[parent_idx] else parent_hash
+            if order == 0:
+                parent_idx += 1
+                out_parent_ids.append(par)
+            cid = f"{par}__{chunk_id}"
+            meta_user = metas_in[min(parent_idx-1, len(metas_in)-1)] if metas_in else {}
+            vectors.append({"id": cid, "values": vec,
+                            "metadata": {**(meta_user or {}), "text": chunk_text,
+                                         "parent_id": par, "chunk_id": chunk_id, "order": order}})
 
-    def query(
-        self,
-        text_or_texts: Union[str, List[str]],
-        top_k: int = 5,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> List[Dict[str, Any]]:
+        if self.opts.deduplicate:
+            seen = set()
+            uniq = []
+            for v in vectors:
+                if v["id"] in seen:
+                    continue
+                seen.add(v["id"])
+                uniq.append(v)
+            vectors = uniq
+
+        # upsert
+        # Pinecone v3: upsert(vectors=[...], namespace=...)
+        self.index.upsert(vectors=vectors, namespace=ns)
+        return out_parent_ids
+
+    def query(self, text_or_texts: Union[str, List[str]], top_k: int = 5,
+              namespace: Optional[str] = None, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         queries = [text_or_texts] if isinstance(text_or_texts, str) else text_or_texts
         results: List[Dict[str, Any]] = []
+        ns = self._ns(namespace)
         for q in queries:
             q_emb = self.embedder.embed([q])[0]
             resp = self.index.query(
-                vector=q_emb,
-                top_k=top_k,
-                include_values=False,
-                include_metadata=True,
-                namespace=self._ns(namespace),
-                filter=where,
+                vector=q_emb, top_k=top_k, include_values=False, include_metadata=True,
+                namespace=ns, filter=where,
             )
-            # unify format
             matches = getattr(resp, "matches", []) or resp.get("matches", [])  # type: ignore
             for m in matches:
-                results.append(
-                    {
-                        "id": m["id"] if isinstance(m, dict) else m.id,
-                        "text": (m["metadata"].get("text") if isinstance(m, dict) else (m.metadata or {}).get("text")),
-                        "score": m["score"] if isinstance(m, dict) else m.score,
-                        "metadata": m["metadata"] if isinstance(m, dict) else (m.metadata or {}),
-                    }
-                )
+                # dict vs object kompatybilnie
+                if isinstance(m, dict):
+                    results.append({"id": m.get("id"),
+                                    "text": (m.get("metadata") or {}).get("text"),
+                                    "score": m.get("score"),
+                                    "metadata": (m.get("metadata") or {})})
+                else:
+                    results.append({"id": getattr(m, "id", None),
+                                    "text": getattr(getattr(m, "metadata", {}), "get", lambda k, d=None: None)("text"),
+                                    "score": getattr(m, "score", None),
+                                    "metadata": getattr(m, "metadata", {})})
         return results
 
-    def delete(
-        self,
-        ids: Optional[List[str]] = None,
-        namespace: Optional[str] = None,
-        where: Optional[Dict[str, Any]] = None,
-    ) -> int:
+    def delete(self, ids: Optional[List[str]] = None, namespace: Optional[str] = None,
+               where: Optional[Dict[str, Any]] = None) -> int:
         try:
             self.index.delete(ids=ids, namespace=self._ns(namespace), filter=where)
             return -1
@@ -479,11 +644,9 @@ class PineconeVectorStore(VectorStoreProtocol):
             return 0
 
     def persist(self) -> None:
-        # zarządzane przez Pinecone – brak akcji
         pass
 
     def flush(self) -> int:
-        # usuń cały namespace
         try:
             self.index.delete(delete_all=True, namespace=self._ns(None))
             return -1
@@ -494,7 +657,8 @@ class PineconeVectorStore(VectorStoreProtocol):
         try:
             stats = self.index.describe_index_stats()
             total = stats.get("total_vector_count") if isinstance(stats, dict) else getattr(stats, "total_vector_count", "n/a")
-            return f"Pinecone enabled • index={self.index_name} • vectors={total} • ns={self.namespace}"
+            return (f"Pinecone enabled • index={self.opts.pinecone_index} • vectors={total} "
+                    f"• ns={self.opts.namespace} • model={self.opts.embedding_model}")
         except Exception as e:
             return f"Pinecone error: {e}"
 
@@ -511,85 +675,80 @@ class PineconeVectorStore(VectorStoreProtocol):
 
 _STORE_SINGLETON: Optional[VectorStoreProtocol] = None
 
+def _opts_from_cfg(cfg: Dict[str, Any]) -> VSOptions:
+    return VSOptions(
+        enabled=bool(cfg.get("enabled", False)),
+        backend=str(cfg.get("backend", "chroma")),
+        collection=str(cfg.get("collection", "default")),
+        persist_dir=str(cfg.get("persist_dir", "data/vector_store")),
+        namespace=str(cfg.get("namespace", "intelligent-predictor")),
+        metric=str(cfg.get("metric", "cosine")),
+        embedding_model=str(cfg.get("embedding_model", "text-embedding-3-small")),
+        embedding_dim=int(cfg.get("embedding_dim", 1536)),
+        batch_size=int(cfg.get("batch_size", 128)),
+        id_strategy=str(cfg.get("id_strategy", "uuid")),
+        deduplicate=bool(cfg.get("deduplicate", False)),
+        chunk_long=bool(cfg.get("chunk_long", True)),
+        max_chunk_tokens=int(cfg.get("max_chunk_tokens", 7500)),
+        chunk_overlap_tokens=int(cfg.get("chunk_overlap_tokens", 200)),
+        pinecone_index=cfg.get("pinecone_index"),
+        pinecone_api_key=cfg.get("pinecone_api_key"),
+        pinecone_environment=cfg.get("pinecone_environment"),
+        pinecone_cloud=cfg.get("pinecone_cloud"),
+    )
+
 def get_store() -> VectorStoreProtocol:
     global _STORE_SINGLETON
     if _STORE_SINGLETON is not None:
         return _STORE_SINGLETON
 
     cfg = _load_vs_config()
-    if not cfg.get("enabled", False):
+    opts = _opts_from_cfg(cfg)
+    if not opts.enabled:
         _STORE_SINGLETON = NoopVectorStore()
         return _STORE_SINGLETON
 
-    backend = str(cfg.get("backend", "chroma")).lower()
+    backend = opts.backend.lower().strip()
     try:
         if backend == "chroma":
             if not CHROMA_AVAILABLE:
                 _STORE_SINGLETON = NoopVectorStore(reason="ChromaDB nie jest zainstalowane.")
             else:
-                _STORE_SINGLETON = ChromaVectorStore(
-                    collection=str(cfg.get("collection", "default")),
-                    persist_dir=str(cfg.get("persist_dir", "data/vector_store")),
-                    metric=str(cfg.get("metric", "cosine")),
-                    embed_model=str(cfg.get("embedding_model", "text-embedding-3-small")),
-                    batch_size=int(cfg.get("batch_size", 128)),
-                    namespace=str(cfg.get("namespace", "intelligent-predictor")),
-                )
+                _STORE_SINGLETON = ChromaVectorStore(opts)
         elif backend == "pinecone":
             if not _PINECONE_AVAILABLE:
                 _STORE_SINGLETON = NoopVectorStore(reason="Pinecone SDK nie jest zainstalowany.")
             else:
-                api_key = cfg.get("pinecone_api_key") or os.getenv("PINECONE_API_KEY")
-                index_name = cfg.get("pinecone_index")
-                if not api_key or not index_name:
+                if not (opts.pinecone_api_key or os.getenv("PINECONE_API_KEY")) or not opts.pinecone_index:
                     _STORE_SINGLETON = NoopVectorStore(reason="Brak PINECONE_API_KEY lub pinecone_index w konfiguracji.")
                 else:
-                    _STORE_SINGLETON = PineconeVectorStore(
-                        index_name=str(index_name),
-                        api_key=str(api_key),
-                        metric=str(cfg.get("metric", "cosine")),
-                        embed_model=str(cfg.get("embedding_model", "text-embedding-3-small")),
-                        batch_size=int(cfg.get("batch_size", 128)),
-                        namespace=str(cfg.get("namespace", "intelligent-predictor")),
-                        environment=cfg.get("pinecone_environment"),
-                        cloud=cfg.get("pinecone_cloud"),
-                        embedding_dim=int(cfg.get("embedding_dim", 1536)),
-                    )
+                    _STORE_SINGLETON = PineconeVectorStore(opts)
         else:
             _STORE_SINGLETON = NoopVectorStore(reason=f"Nieznany backend vector_store: {backend}")
     except Exception as e:
+        LOGGER.exception("Vector store init error")
         _STORE_SINGLETON = NoopVectorStore(reason=f"Vector store init error: {e}")
 
     return _STORE_SINGLETON
 
 
 # =========================================
-# Wygodne funkcje modułowe
+# Wygodne funkcje modułowe (back-compat)
 # =========================================
 
-def upsert_texts(
-    texts: List[str],
-    ids: Optional[List[str]] = None,
-    metadatas: Optional[List[Dict[str, Any]]] = None,
-    namespace: Optional[str] = None,
-) -> List[str]:
+def upsert_texts(texts: List[str], ids: Optional[List[str]] = None,
+                 metadatas: Optional[List[Dict[str, Any]]] = None,
+                 namespace: Optional[str] = None) -> List[str]:
     store = get_store()
     return store.upsert_texts(texts, ids=ids, metadatas=metadatas, namespace=namespace)
 
-def query(
-    text_or_texts: Union[str, List[str]],
-    top_k: int = 5,
-    namespace: Optional[str] = None,
-    where: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+def query(text_or_texts: Union[str, List[str]], top_k: int = 5,
+          namespace: Optional[str] = None, where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     store = get_store()
     return store.query(text_or_texts, top_k=top_k, namespace=namespace, where=where)
 
-def delete(
-    ids: Optional[List[str]] = None,
-    namespace: Optional[str] = None,
-    where: Optional[Dict[str, Any]] = None,
-) -> int:
+def delete(ids: Optional[List[str]] = None, namespace: Optional[str] = None,
+           where: Optional[Dict[str, Any]] = None) -> int:
     store = get_store()
     return store.delete(ids=ids, namespace=namespace, where=where)
 

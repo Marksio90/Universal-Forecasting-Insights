@@ -1,0 +1,32 @@
+app:
+  title: "Intelligent Predictor"
+  theme: "dark"
+  max_file_size_mb: 400
+  allow_formats: ["csv","xlsx","json","docx","pdf"]
+  enable_vector_store: false
+  enable_redis_cache: false
+
+ml:
+  problem_detection_rows_min: 50
+  default_metric_regression: "rmse"
+  default_metric_classification: "f1_weighted"
+  test_size: 0.2
+  random_state: 42
+  enable_shap: true
+  max_training_minutes: 10
+
+ts:
+  horizon: 12
+  frequency_guess: "auto"
+  backtesting_folds: 3
+  ts_metric_primary: "sMAPE"
+
+ai:
+  model: "gpt-4o-mini"
+  temperature: 0.2
+  max_tokens: 900
+
+reports:
+  include_eda_summary: true
+  include_model_cards: true
+  include_business_recommendations: true

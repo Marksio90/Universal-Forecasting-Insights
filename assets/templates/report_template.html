@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>{{ title or "Raport" }}</title>
+
+<style>
+/* ===============================
+   Intelligent Predictor — Report PRO
+   Biznesowy, responsywny, print-ready
+   =============================== */
+
+/* ---- Tokens ---- */
+:root{
+  --bg:#0f1216;
+  --bg-elev:#151a21;
+  --paper:#ffffff;
+  --text:#e7ecf3;
+  --muted:#a5adba;
+  --primary:#4A90E2;
+  --ok:#22c55e; --warn:#f59e0b; --err:#ef4444;
+  --border:#263040;
+  --radius:14px;
+  --shadow: 0 12px 32px rgba(0,0,0,.35);
+  --mono: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+
+/* Light mode if opened w/ system light */
+@media (prefers-color-scheme: light){
+  :root{
+    --bg:#f7f8fb; --bg-elev:#ffffff;
+    --text:#14171a; --muted:#4b5563; --border:#e5e7eb;
+    --shadow: 0 10px 24px rgba(0,0,0,.08);
+  }
+}
+
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;}
+.container{max-width:1080px;margin:0 auto;padding:24px;}
+.card{background:var(--bg-elev);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin:14px 0;box-shadow:var(--shadow);}
+h1{font-size:28px;margin:0 0 8px 0;}
+h2{font-size:20px;margin:0 0 10px 0;}
+h3{font-size:16px;margin:0 0 8px 0;color:var(--muted)}
+p,li,small{color:var(--text)}
+a{color:var(--primary);text-decoration:none}
+a:hover{text-decoration:underline}
+.tag{display:inline-block;border:1px solid var(--border);border-radius:12px;padding:2px 8px;margin-right:6px;color:var(--muted);font-size:12px}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.kpi{background:var(--bg-elev);border:1px solid var(--border);border-radius:12px;padding:14px}
+.kpi .label{color:var(--muted);font-size:12px}
+.kpi .value{font-size:20px;font-weight:700}
+.kpi.ok .value{color:var(--ok)} .kpi.warn .value{color:var(--warn)} .kpi.err .value{color:var(--err)}
+
+pre,code,kbd,samp{font-family:var(--mono);background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px}
+pre{padding:12px;overflow:auto}
+.table{width:100%;border-collapse:separate;border-spacing:0;border:1px solid var(--border);border-radius:12px;overflow:hidden}
+.table th,.table td{padding:10px 12px;border-bottom:1px solid var(--border);text-align:left}
+.table thead th{background:rgba(255,255,255,.04)}
+.table tbody tr:hover{background:rgba(255,255,255,.03)}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;border:1px solid var(--border);color:var(--muted)}
+.badge.primary{border-color:var(--primary);color:var(--primary)}
+.badge.ok{border-color:var(--ok);color:var(--ok)}
+.badge.warn{border-color:var(--warn);color:var(--warn)}
+.badge.err{border-color:var(--err);color:var(--err)}
+
+.header{
+  display:flex;align-items:center;justify-content:space-between;margin-bottom:16px
+}
+.brand{display:flex;align-items:center;gap:12px}
+.brand .logo{width:36px;height:36px;border-radius:8px;background:linear-gradient(145deg,#2b3441,#0f1216);display:flex;align-items:center;justify-content:center;border:1px solid var(--border)}
+.brand .logo span{color:var(--primary);font-weight:800}
+
+.hr{height:1px;background:var(--border);margin:18px 0;border:0}
+
+.figure{border:1px dashed var(--border);border-radius:12px;padding:10px;text-align:center}
+.figure img{max-width:100%;height:auto;border-radius:8px}
+
+/* Footer / watermark */
+.footer{color:var(--muted);font-size:12px;margin-top:18px;text-align:right}
+
+/* Print (PDF export friendly) */
+@media print{
+  body{background:var(--paper);color:#111}
+  .card, .kpi, .table{box-shadow:none}
+  a{color:#0b6dff}
+  .container{padding:0 8mm}
+}
+
+/* Small screens */
+@media (max-width:840px){
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .grid-2{grid-template-columns:1fr}
+  .grid-3{grid-template-columns:1fr}
+}
+</style>
+</head>
+
+<body>
+  <div class="container">
+
+    <!-- Header -->
+    <div class="header">
+      <div class="brand">
+        <div class="logo"><span>IP</span></div>
+        <div>
+          <h1>{{ title or "Raport" }}</h1>
+          {% if subtitle %}<div class="badge primary">{{ subtitle }}</div>{% endif %}
+        </div>
+      </div>
+      <div class="meta" style="text-align:right">
+        {% if run_meta %}
+          {% if run_meta.timestamp %}<div class="badge">{{ run_meta.timestamp }}</div>{% endif %}
+          {% if run_meta.user %}<div class="badge">Użytkownik: {{ run_meta.user }}</div>{% endif %}
+          {% if run_meta.version %}<div class="badge">Wersja: {{ run_meta.version }}</div>{% endif %}
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- KPI row (optional) -->
+    {% if kpis %}
+      <div class="kpis">
+        {% for k in kpis %}
+          <div class="kpi {{ k.status or '' }}">
+            <div class="label">{{ k.label }}</div>
+            <div class="value">
+              {{ k.value }}
+              {% if k.suffix %}<small>{{ k.suffix }}</small>{% endif %}
+            </div>
+            {% if k.delta %}
+              <div class="badge {{ 'ok' if k.delta>0 else 'err' if k.delta<0 else '' }}">
+                {% if k.delta>0 %}+{% endif %}{{ k.delta }}{{ k.delta_suffix or '' }}
+              </div>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    <!-- Context / Metrics -->
+    <div class="card">
+      <h2>Metryki / Kontekst</h2>
+      {% if metrics %}
+        <pre>{{ metrics | tojson(indent=2, ensure_ascii=False) }}</pre>
+      {% else %}
+        <p class="badge warn">Brak metryk — dołącz `metrics` w kontekście aby wypełnić sekcję.</p>
+      {% endif %}
+      {% if tags %}
+        <div style="margin-top:10px">
+          {% for t in tags %}<span class="tag">{{ t }}</span>{% endfor %}
+        </div>
+      {% endif %}
+    </div>
+
+    <!-- Insights / Recommendations -->
+    {% if insights or recommendations %}
+      <div class="grid-2">
+        {% if insights %}
+        <div class="card">
+          <h2>Najważniejsze wnioski</h2>
+          <ul>
+            {% for it in insights %}<li>{{ it }}</li>{% endfor %}
+          </ul>
+        </div>
+        {% endif %}
+        {% if recommendations %}
+        <div class="card">
+          <h2>Rekomendacje biznesowe</h2>
+          <ol>
+            {% for rec in recommendations %}<li>{{ rec }}</li>{% endfor %}
+          </ol>
+        </div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    <!-- Charts (list of base64 images) -->
+    {% if charts %}
+      <div class="card">
+        <h2>Wizualizacje</h2>
+        <div class="grid-2">
+          {% for ch in charts %}
+            <figure class="figure">
+              {% if ch.caption %}<figcaption style="text-align:left;margin:4px 0 8px;color:var(--muted)">{{ ch.caption }}</figcaption>{% endif %}
+              <img src="{{ ch.src }}" alt="{{ ch.alt or 'Wykres' }}" />
+            </figure>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Forecast table -->
+    {% if forecast %}
+      <div class="card">
+        <h2>Prognoza</h2>
+        <table class="table">
+          <thead><tr>
+            {% for col in forecast.columns %}<th>{{ col }}</th>{% endfor %}
+          </tr></thead>
+          <tbody>
+            {% for row in forecast.rows %}
+              <tr>
+                {% for col in forecast.columns %}
+                  <td>{{ row[col] }}</td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    <!-- Anomalies -->
+    {% if anomalies %}
+      <div class="card">
+        <h2>Anomalie</h2>
+        <table class="table">
+          <thead><tr>
+            {% for col in anomalies.columns %}<th>{{ col }}</th>{% endfor %}
+          </tr></thead>
+          <tbody>
+            {% for row in anomalies.rows %}
+              <tr>
+                {% for col in anomalies.columns %}
+                  <td>{{ row[col] }}</td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+
+    <!-- Model Card -->
+    {% if model_card %}
+      <div class="card">
+        <h2>Karta modelu</h2>
+        <div class="grid-3">
+          <div>
+            <h3>Tożsamość</h3>
+            <p><b>Nazwa:</b> {{ model_card.name or "—" }}<br/>
+               <b>Typ:</b> {{ model_card.type or "—" }}<br/>
+               <b>Wersja:</b> {{ model_card.version or "—" }}</p>
+          </div>
+          <div>
+            <h3>Trenowanie</h3>
+            <p><b>Dane:</b> {{ model_card.dataset or "—" }}<br/>
+               <b>Split:</b> {{ model_card.split or "—" }}<br/>
+               <b>Hiperparametry:</b></p>
+            {% if model_card.hparams %}<pre>{{ model_card.hparams | tojson(indent=2, ensure_ascii=False) }}</pre>{% endif %}
+          </div>
+          <div>
+            <h3>Metryki</h3>
+            {% if model_card.metrics %}<pre>{{ model_card.metrics | tojson(indent=2, ensure_ascii=False) }}</pre>{% else %}<p>—</p>{% endif %}
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <!-- Notes -->
+    {% if notes %}
+      <div class="card">
+        <h2>Notatki</h2>
+        <p>{{ notes }}</p>
+      </div>
+    {% endif %}
+
+    <div class="footer">
+      Wygenerowano przez Intelligent Predictor • {{ run_meta.timestamp if run_meta and run_meta.timestamp else "" }}
+    </div>
+
+  </div>
+</body>
+</html>

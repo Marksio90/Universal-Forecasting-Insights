@@ -34,9 +34,17 @@ except Exception:
 
 # Optional language detection (graceful fallback)
 try:
-    from langdetect import detect, LangDetectException
-    HAS_LANGDETECT = True
-except ImportError:
+    import importlib
+    # Check for the package without a static import so linters won't complain if it's absent
+    langdetect_spec = importlib.util.find_spec("langdetect")
+    if langdetect_spec is not None:
+        lang_module = importlib.import_module("langdetect")
+        detect = getattr(lang_module, "detect")
+        LangDetectException = getattr(lang_module, "LangDetectException", Exception)
+        HAS_LANGDETECT = True
+    else:
+        HAS_LANGDETECT = False
+except Exception:
     HAS_LANGDETECT = False
 
 # ========================================================================================

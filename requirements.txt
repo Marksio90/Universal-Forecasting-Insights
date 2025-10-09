@@ -3,9 +3,6 @@
 # Additional packages for development, testing, and debugging
 # ================================================================================================
 
-# Include all production dependencies
--r requirements.txt
-
 # ================================
 # Testing Framework
 # ================================
@@ -61,7 +58,7 @@ semgrep==1.88.0
 # Documentation
 # ================================
 sphinx==8.0.2
-sphinx-rtd-theme==2.0.0
+sphinx-rtd-theme>=3.0.0
 sphinx-autodoc-typehints==2.3.0
 sphinx-click==6.0.0
 myst-parser==4.0.0

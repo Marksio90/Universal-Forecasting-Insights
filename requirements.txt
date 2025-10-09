@@ -1,53 +1,171 @@
-# =========================
-# Intelligent Predictor — runtime deps
-# Python 3.10–3.12 (sprawdzone)
-# =========================
+# ================================================================================================
+# INTELLIGENT PREDICTOR PRO++++ — Development Dependencies
+# Additional packages for development, testing, and debugging
+# ================================================================================================
 
-# Core
-streamlit==1.36.0
-python-dotenv==1.0.1
-pydantic==2.9.2
-packaging==24.1
+# Include all production dependencies
+-r requirements.txt
 
-# Data Processing
-pandas==2.2.2
-numpy==1.26.4              # stabilne dla sklearn 1.5 / shap / lightgbm na Py 3.10–3.12
-scipy==1.13.1              # zgodne z numpy 1.26 i sklearn 1.5
-openpyxl==3.1.5
-python-docx==1.1.2
-PyPDF2==3.0.1
-python-magic==0.4.27       # linux wymaga libmagic w systemie
+# ================================
+# Testing Framework
+# ================================
+pytest==8.3.3
+pytest-cov==5.0.0
+pytest-mock==3.14.0
+pytest-asyncio==0.24.0
+pytest-benchmark==4.0.0
+pytest-xdist==3.6.1
+pytest-timeout==2.3.1
+pytest-html==4.1.1
+pytest-json-report==1.5.0
+coverage[toml]==7.6.1
 
-# AI & ML
-openai==1.46.0
-scikit-learn==1.5.1
-xgboost==2.1.1
-lightgbm==4.4.0
-shap==0.46.0
+# Test Data Generation
+hypothesis==6.112.1
+faker==28.4.1
+factory-boy==3.3.1
 
-# Time Series
-prophet==1.1.5             # wymaga cmdstan przy pierwszym uruchomieniu (auto-pobierze via cmdstanpy)
-statsmodels==0.14.3
-pmdarima==2.0.4
+# ================================
+# Code Quality & Formatting
+# ================================
+black==24.8.0
+isort==5.13.2
+flake8==7.1.1
+pylint==3.2.7
+mypy==1.11.2
+autopep8==2.3.1
+yapf==0.40.2
 
-# Visualization
-plotly==5.23.0
-altair==5.4.1
-kaleido==0.2.1             # export obrazów z Plotly w raportach
+# Additional Flake8 Plugins
+flake8-docstrings==1.7.0
+flake8-bugbear==24.8.19
+flake8-comprehensions==3.15.0
+flake8-simplify==0.21.0
+pep8-naming==0.14.1
 
-# Database / Vector / Cache
-SQLAlchemy==2.0.34
-chromadb==0.5.5
-redis==5.0.8
+# Type Checking
+types-requests==2.32.0.20240914
+types-PyYAML==6.0.12.20240917
+types-redis==4.6.0.20240903
+types-setuptools==74.1.0.20240907
 
-# MLOps
-mlflow==2.15.1
+# ================================
+# Security & Vulnerability Scanning
+# ================================
+bandit==1.7.9
+safety==3.2.7
+pip-audit==2.7.3
+semgrep==1.88.0
 
-# EDA
-ydata-profiling==4.10.0
+# ================================
+# Documentation
+# ================================
+sphinx==8.0.2
+sphinx-rtd-theme==2.0.0
+sphinx-autodoc-typehints==2.3.0
+sphinx-click==6.0.0
+myst-parser==4.0.0
+recommonmark==0.7.1
 
-# Utils
-PyYAML==6.0.2
-loguru==0.7.2
-Jinja2==3.1.4
-joblib==1.4.2
+# Alternative: MkDocs
+mkdocs==1.6.1
+mkdocs-material==9.5.36
+mkdocs-material-extensions==1.3.1
+mkdocstrings[python]==0.26.1
+mkdocs-jupyter==0.25.0
+
+# ================================
+# Jupyter & Notebooks
+# ================================
+jupyter==1.1.1
+jupyterlab==4.2.5
+ipython==8.27.0
+ipykernel==6.29.5
+ipywidgets==8.1.5
+notebook==7.2.2
+nbconvert==7.16.4
+nbformat==5.10.4
+
+# Jupyter Extensions
+jupyter-contrib-nbextensions==0.7.0
+jupyterlab-git==0.50.1
+jupyterlab-lsp==5.1.0
+python-lsp-server==1.12.0
+
+# ================================
+# Performance Profiling
+# ================================
+memory-profiler==0.61.0
+py-spy==0.3.14
+scalene==1.5.47
+line-profiler==4.1.3
+snakeviz==2.2.0
+pyinstrument==4.7.3
+
+# ================================
+# Debugging Tools
+# ================================
+ipdb==0.13.13
+pdbpp==0.10.3
+better-exceptions==0.3.3
+stackprinter==0.2.12
+
+# ================================
+# Git Hooks & Pre-commit
+# ================================
+pre-commit==3.8.0
+commitizen==3.29.1
+conventional-pre-commit==3.4.0
+
+# ================================
+# Build Tools
+# ================================
+build==1.2.2
+twine==5.1.1
+wheel==0.44.0
+setuptools==74.1.2
+pip-tools==7.4.1
+
+# ================================
+# Mock & Stubs
+# ================================
+responses==0.25.3
+freezegun==1.5.1
+time-machine==2.15.0
+vcrpy==6.0.1
+
+# ================================
+# Database Testing
+# ================================
+pytest-postgresql==6.1.0
+testing.postgresql==1.3.0
+
+# ================================
+# Linting & Static Analysis
+# ================================
+pycodestyle==2.12.1
+pydocstyle==6.3.0
+pylama==8.4.1
+vulture==2.12
+radon==6.0.1
+mccabe==0.7.0
+pyflakes==3.2.0
+
+# ================================
+# Utilities
+# ================================
+watchdog==5.0.2                      # File system monitoring
+invoke==2.2.0                        # Task execution
+colorama==0.4.6                      # Colored terminal output
+termcolor==2.4.0                     # Terminal colors
+tabulate==0.9.0                      # Pretty tables
+python-dotenv==1.0.1                 # .env file handling
+
+# ================================
+# Experimentation
+# ================================
+streamlit-extras==0.4.7              # Additional Streamlit components
+streamlit-aggrid==1.0.5              # AG Grid for Streamlit
+streamlit-plotly-events==0.0.6       # Plotly event handling
+
+# ================================================================================================

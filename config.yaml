@@ -1,99 +1,662 @@
-# ================================
-# Intelligent Predictor — CONFIG
-# ================================
+# ================================================================================================
+# INTELLIGENT PREDICTOR PRO++++ — COMPREHENSIVE CONFIGURATION
+# Production-ready configuration with advanced features and environment-specific overrides
+# ================================================================================================
 
+# ================================
+# APPLICATION SETTINGS
+# ================================
 app:
-  title: "Intelligent Predictor"
-  theme: "dark"                        # dark | light (styling / motywy wykresów)
+  # Basic info
+  title: "Intelligent Predictor PRO"
+  version: "2.0.0"
+  environment: "production"              # development | staging | production
+  
+  # UI/UX
+  theme: "dark"                          # dark | light | auto
   locale: "pl_PL"
   timezone: "Europe/Warsaw"
-  max_file_size_mb: 400
-  allow_formats: ["csv","xlsx","json","docx","pdf"]
-  enable_vector_store: false
-  enable_redis_cache: false
-  date_display_format: "YYYY-MM-DD"
-  # ścieżki / branding
+  date_display_format: "YYYY-MM-DD HH:mm"
+  number_format: "pl"                    # pl (1 234,56) | en (1,234.56)
+  
+  # File handling
+  max_file_size_mb: 500
+  max_file_size_pdf_mb: 100
+  max_file_size_image_mb: 50
+  allow_formats: ["csv", "xlsx", "xls", "json", "jsonl", "docx", "pdf", "txt", "parquet"]
+  temp_file_retention_hours: 24
+  
+  # Session & performance
+  session_timeout_minutes: 120
+  max_concurrent_users: 50
+  enable_performance_monitoring: true
+  enable_user_analytics: true
+  
+  # Paths & assets
   assets_dir: "assets"
   logo_path: "assets/images/logo.png"
+  favicon_path: "assets/images/favicon.ico"
+  custom_css_path: "assets/styles/custom.css"
+  
+  # Features
+  enable_vector_store: false
+  enable_redis_cache: false
+  enable_multipage: true
+  enable_dark_mode_toggle: true
+  enable_export_all_formats: true
+  
+  # Advanced
+  debug_mode: false
+  profiling_enabled: false
+  sentry_dsn: ""                         # Error tracking (optional)
 
+# ================================
+# LOGGING CONFIGURATION
+# ================================
 logging:
-  level: INFO                          # globalny poziom
-  console_level: INFO
-  file_level: DEBUG
+  # Levels: TRACE | DEBUG | INFO | WARNING | ERROR | CRITICAL
+  level: "INFO"
+  console_level: "INFO"
+  file_level: "DEBUG"
+  
+  # Rotation & retention
   rotation: "25 MB"
   retention: "30 days"
-  serialize_json: true                 # dodatkowy plik JSONL
+  compression: "zip"
+  
+  # Output formats
+  serialize_json: true
   json_filename: "app.jsonl"
   log_filename: "app.log"
+  
+  # Advanced options
   backtrace: false
   diagnose: false
-  enqueue: true                        # bezpieczne wątkowo/procesowo
-  memory_buffer: 5000                  # linie bufora do podglądu w UI
+  enqueue: true                          # Thread-safe logging
+  memory_buffer: 5000                    # Lines to keep in memory for UI
+  
+  # Log locations
+  log_dir: "data/logs"
+  error_log: "data/logs/error.log"
+  access_log: "data/logs/access.log"
+  
+  # Filtering
+  filter_patterns: []                    # Regex patterns to exclude
+  include_modules: []                    # Empty = all modules
+  exclude_modules: ["urllib3", "matplotlib"]
+  
+  # Performance
+  log_performance_metrics: true
+  log_sql_queries: false
+  log_api_calls: true
 
+# ================================
+# DATABASE CONFIGURATION
+# ================================
 database:
-  url: "sqlite:///data/app.db"         # SQLAlchemy
+  # Connection
+  url: "sqlite:///data/app.db"
   echo: false
+  pool_pre_ping: true
+  
+  # Connection pool (for PostgreSQL/MySQL)
+  pool_size: 10
+  max_overflow: 20
+  pool_timeout: 30
+  pool_recycle: 3600
+  
+  # Advanced
+  isolation_level: "READ_COMMITTED"
+  connect_args:
+    check_same_thread: false             # SQLite specific
+    timeout: 30
+  
+  # Backup
+  auto_backup: true
+  backup_dir: "data/backups"
+  backup_retention_days: 30
+  backup_schedule: "0 2 * * *"           # Cron: daily at 2 AM
 
+# ================================
+# CACHE CONFIGURATION
+# ================================
 cache:
-  redis_url: ""                        # np. redis://localhost:6379/0
+  # Redis (optional)
+  redis_url: ""                          # redis://localhost:6379/0
+  redis_password: ""
+  redis_db: 0
+  redis_socket_timeout: 5
+  redis_socket_connect_timeout: 5
+  
+  # TTL settings
   default_ttl_seconds: 3600
+  ttl_data_preview: 1800
+  ttl_model_predictions: 7200
+  ttl_eda_results: 3600
+  
+  # Memory cache (fallback)
+  use_memory_cache: true
+  memory_cache_size: 1000
+  
+  # Cache strategies
+  enable_query_cache: true
+  enable_model_cache: true
+  enable_plot_cache: true
 
+# ================================
+# VECTOR STORE CONFIGURATION
+# ================================
 vector_store:
-  backend: "chroma"                    # chroma | pinecone
+  # Backend selection
+  backend: "chroma"                      # chroma | pinecone | weaviate | qdrant
+  
+  # ChromaDB settings
   chroma:
     path: "data/vector"
     collection: "ip_embeddings"
+    distance_metric: "cosine"            # cosine | l2 | ip
+    embedding_model: "all-MiniLM-L6-v2"
+    persist_directory: true
+  
+  # Pinecone settings
   pinecone:
-    index: ""
+    api_key: ""
     environment: ""
-    namespace: "ip"
+    index_name: "intelligent-predictor"
+    dimension: 384
+    metric: "cosine"
+    namespace: "default"
+    pods: 1
+    replicas: 1
+    pod_type: "p1.x1"
+  
+  # Weaviate settings
+  weaviate:
+    url: "http://localhost:8080"
+    api_key: ""
+    class_name: "IPDocument"
+  
+  # Common settings
+  chunk_size: 1000
+  chunk_overlap: 200
+  max_results: 10
+  similarity_threshold: 0.7
 
+# ================================
+# MACHINE LEARNING CONFIGURATION
+# ================================
 ml:
+  # Problem detection
   problem_detection_rows_min: 50
-  default_metric_regression: "rmse"    # używane w kartach/raporcie
+  problem_detection_auto: true
+  classification_threshold: 10           # Max unique values for classification
+  
+  # Metrics
+  default_metric_regression: "rmse"
   default_metric_classification: "f1_weighted"
+  additional_metrics_regression: ["mae", "r2", "mape", "mse"]
+  additional_metrics_classification: ["accuracy", "precision", "recall", "roc_auc"]
+  
+  # Train/test split
   test_size: 0.2
+  validation_size: 0.1
+  stratify: true
+  shuffle: true
   random_state: 42
+  
+  # Feature engineering
+  enable_feature_engineering: true
+  auto_feature_selection: true
+  feature_selection_method: "mutual_info"  # mutual_info | chi2 | f_classif
+  max_features: 50
+  
+  # Model training
   enable_shap: true
-  shap_sample_size: 2000               # max rekordów do SHAP
-  n_jobs: -1                           # wątki dla modeli wspierających
-  max_training_minutes: 10
-  allow_categorical_encoding: true     # automatyczny encoding niskiej krotności
-  registry_autoprune: true             # czyszczenie sierot w rejestrze
+  shap_sample_size: 2000
+  n_jobs: -1
+  max_training_minutes: 15
+  early_stopping_rounds: 50
+  
+  # Categorical encoding
+  allow_categorical_encoding: true
+  encoding_method: "auto"                # auto | label | onehot | target
+  high_cardinality_threshold: 20
+  
+  # Hyperparameter tuning
+  enable_hyperparameter_tuning: true
+  tuning_method: "random"                # grid | random | bayesian
+  tuning_n_iter: 20
+  tuning_cv_folds: 3
+  
+  # AutoML settings
+  automl_time_limit: 600                 # seconds
+  automl_algorithms: ["lightgbm", "xgboost", "random_forest", "extra_trees"]
+  automl_ensemble: true
+  
+  # Model registry
+  registry_autoprune: true
+  registry_max_models: 50
+  registry_backup: true
+  
+  # Explainability
+  enable_pdp: true                       # Partial Dependence Plots
+  enable_ice: false                      # Individual Conditional Expectation
+  enable_lime: false                     # Local Interpretable Model-agnostic Explanations
+  
+  # Monitoring
+  enable_drift_detection: true
+  drift_check_interval_days: 7
+  drift_threshold: 0.1
 
+# ================================
+# TIME SERIES CONFIGURATION
+# ================================
 ts:
-  horizon: 12
-  frequency_guess: "auto"              # auto | D | W | MS | Q | Y ...
-  backtesting_folds: 3
+  # Forecasting
+  horizon: 30
+  horizon_max: 365
+  frequency_guess: "auto"                # auto | D | W | M | Q | Y
+  
+  # Validation
+  backtesting_folds: 5
+  backtesting_initial: 730               # days
+  backtesting_period: 180                # days
+  backtesting_horizon: 30                # days
+  
+  # Metrics
   ts_metric_primary: "sMAPE"
-  extra_regressors: "auto"             # auto | [] (lista kolumn) | null
-  growth: "linear"                     # linear | logistic
-  outlier_clip: "iqr"                  # none | iqr | zscore
+  ts_metrics_additional: ["MAE", "RMSE", "MAPE", "MASE"]
+  
+  # Prophet settings
+  prophet_growth: "linear"               # linear | logistic | flat
+  prophet_changepoint_prior_scale: 0.05
+  prophet_seasonality_prior_scale: 10.0
+  prophet_holidays_prior_scale: 10.0
+  prophet_seasonality_mode: "additive"   # additive | multiplicative
+  prophet_yearly_seasonality: "auto"
+  prophet_weekly_seasonality: "auto"
+  prophet_daily_seasonality: "auto"
+  prophet_mcmc_samples: 0
+  prophet_interval_width: 0.95
+  
+  # SARIMA settings
+  sarima_order: [1, 1, 1]                # (p, d, q)
+  sarima_seasonal_order: [1, 1, 1, 12]   # (P, D, Q, s)
+  sarima_auto: true                      # Auto ARIMA search
+  
+  # Data preprocessing
+  outlier_clip: "iqr"                    # none | iqr | zscore | percentile
+  outlier_iqr_multiplier: 1.5
+  outlier_zscore_threshold: 3.0
+  interpolate_method: "linear"           # linear | polynomial | spline
+  
+  # Regressors
+  extra_regressors: "auto"               # auto | [] | null
+  regressor_mode: "additive"             # additive | multiplicative
+  
+  # Output
   include_history: false
+  include_components: true
+  include_changepoints: true
+  
+  # Advanced
+  uncertainty_samples: 1000
+  enable_fourier_features: true
+  fourier_order: 10
 
+# ================================
+# AI/LLM CONFIGURATION
+# ================================
 ai:
-  provider: "openai"                   # openai | azure
-  model: "gpt-4o-mini"
-  temperature: 0.2
-  max_tokens: 900
-  top_p: 1.0
-  system_prompt: "Jesteś seniorem Data Scientist i Analitykiem Biznesowym. Odpowiadasz zwięźle i konkretnie."
-  timeout_seconds: 60
+  # Provider
+  provider: "openai"                     # openai | azure | anthropic | cohere
+  
+  # OpenAI settings
+  openai:
+    api_key: ""                          # Set via env: OPENAI_API_KEY
+    organization: ""
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    max_tokens: 1500
+    top_p: 1.0
+    frequency_penalty: 0.0
+    presence_penalty: 0.0
+    timeout_seconds: 60
+    max_retries: 3
+    retry_delay: 1
+  
+  # Azure OpenAI settings
+  azure:
+    api_key: ""
+    api_base: ""
+    api_version: "2023-12-01-preview"
+    deployment_name: ""
+    model: "gpt-4"
+  
+  # Anthropic settings
+  anthropic:
+    api_key: ""
+    model: "claude-3-sonnet-20240229"
+    max_tokens: 4096
+  
+  # Prompts
+  system_prompt: |
+    Jesteś ekspertem Data Science i Analitykiem Biznesowym z 10-letnim doświadczeniem.
+    Twoje odpowiedzi są zawsze:
+    - Zwięzłe i konkretne
+    - Oparte na danych i faktach
+    - Ukierunkowane na wartość biznesową
+    - Zawierają konkretne rekomendacje działań
+    
+    Komunikujesz się profesjonalnie po polsku, używając terminologii branżowej.
+  
+  user_prompt_template: |
+    Analiza danych:
+    {data_summary}
+    
+    Cel analizy: {goal}
+    
+    Proszę o:
+    1. Kluczowe wnioski z danych
+    2. Identyfikację trendów i anomalii
+    3. Rekomendacje biznesowe
+    4. Następne kroki
+  
+  # Features
+  enable_streaming: false
+  enable_function_calling: false
+  enable_embeddings: true
+  embeddings_model: "text-embedding-3-small"
+  embeddings_dimensions: 1536
+  
+  # Rate limiting
+  max_requests_per_minute: 60
+  max_tokens_per_minute: 90000
+  
+  # Caching
+  cache_responses: true
+  cache_ttl: 86400                       # 24 hours
 
+# ================================
+# REPORTING CONFIGURATION
+# ================================
 reports:
+  # Content
   include_eda_summary: true
+  include_statistical_tests: true
   include_model_cards: true
+  include_feature_importance: true
   include_business_recommendations: true
-  plot_render: "cdn"                   # cdn | inline (dla Plotly w raportach)
+  include_technical_details: false
+  
+  # Format
+  default_format: "html"                 # html | pdf | markdown
+  plot_render: "cdn"                     # cdn | inline
+  plot_format: "html"                    # html | png | svg
+  plot_scale: 2.0
+  
+  # Templates
   template_path: "assets/templates/report_template.html"
+  custom_templates_dir: "assets/templates/custom"
+  
+  # PDF settings
+  pdf_engine: "playwright"               # weasyprint | playwright | reportlab
+  pdf_page_size: "A4"
+  pdf_orientation: "portrait"            # portrait | landscape
+  pdf_margins: "15mm"
+  pdf_font: "DejaVu Sans"
+  pdf_dark_mode: false
+  
+  # Export
   exports_dir: "data/exports"
+  export_formats: ["html", "pdf", "json"]
+  auto_cleanup_days: 30
+  
+  # Branding
+  include_logo: true
+  include_footer: true
+  company_name: "Intelligent Predictor PRO"
+  report_author: "Data Science Team"
+  
+  # Advanced
+  include_toc: true
+  toc_depth: 3
+  include_page_numbers: true
+  watermark: ""
 
-feature_flags:
-  enable_anomaly_detection: true
-  enable_model_registry: true
-  enable_forecast_band: true
-  enable_openai_test_button: true
+# ================================
+# VISUALIZATION CONFIGURATION
+# ================================
+visualization:
+  # Theme
+  default_theme: "business_dark"         # business_dark | business_light | neon | minimal
+  color_palette: ["#4A90E2", "#22d3ee", "#a78bfa", "#34d399", "#f59e0b", "#f87171"]
+  
+  # Chart settings
+  default_height: 450
+  default_width: 800
+  responsive: true
+  show_modebar: true
+  show_legend: true
+  
+  # Performance
+  max_points_scatter: 10000
+  enable_webgl: true
+  adaptive_sampling: true
+  
+  # Export
+  export_format: "png"
+  export_scale: 3.0
+  export_width: 1920
+  export_height: 1080
+  
+  # Dashboard
+  dashboard_layout: "comfortable"        # compact | comfortable | spacious
+  dashboard_refresh_seconds: 30
 
+# ================================
+# DATA PROCESSING CONFIGURATION
+# ================================
+data_processing:
+  # Parsing
+  csv_delimiter: "auto"                  # auto | , | ; | \t
+  csv_encoding: "auto"                   # auto | utf-8 | latin1 | cp1252
+  decimal_separator: ","                 # for Polish: , (for English: .)
+  thousands_separator: " "               # for Polish: space
+  
+  # Cleaning
+  auto_clean: true
+  remove_duplicates: true
+  fill_missing_numeric: "median"         # mean | median | mode | forward | backward
+  fill_missing_categorical: "mode"       # mode | constant
+  drop_high_missing_threshold: 0.8       # Drop columns with >80% missing
+  
+  # Type detection
+  auto_detect_types: true
+  auto_detect_dates: true
+  date_formats: ["YYYY-MM-DD", "DD-MM-YYYY", "DD/MM/YYYY", "YYYY/MM/DD"]
+  
+  # Validation
+  validate_on_load: true
+  check_data_quality: true
+  generate_profile: false                # ydata-profiling (can be slow)
+  
+  # Memory
+  chunk_size: 10000
+  low_memory_mode: false
+  
+  # Advanced
+  enable_sampling: true
+  sample_size: 100000                    # For large datasets
+  stratify_sampling: true
+
+# ================================
+# SECURITY CONFIGURATION
+# ================================
 security:
+  # Input validation
   sanitize_html: true
+  sanitize_sql: true
+  max_query_length: 10000
+  
+  # File security
   allow_local_file_downloads: true
+  scan_uploads: false                    # Virus scanning (requires ClamAV)
+  allowed_mime_types: ["text/*", "application/vnd.*", "application/json"]
+  
+  # API security
+  require_api_key: false
+  api_key_header: "X-API-Key"
+  rate_limit_enabled: true
+  rate_limit_requests: 100
+  rate_limit_window: 60                  # seconds
+  
+  # Session security
+  session_cookie_secure: true
+  session_cookie_httponly: true
+  session_cookie_samesite: "lax"
+  
+  # CORS
+  cors_enabled: false
+  cors_origins: ["*"]
+  cors_methods: ["GET", "POST"]
+  
+  # Authentication (future)
+  enable_authentication: false
+  auth_provider: "local"                 # local | oauth | saml
+  require_mfa: false
+
+# ================================
+# FEATURE FLAGS
+# ================================
+feature_flags:
+  # Core features
+  enable_data_upload: true
+  enable_eda: true
+  enable_predictions: true
+  enable_forecasting: true
+  enable_anomaly_detection: true
+  enable_clustering: false
+  
+  # Advanced features
+  enable_model_registry: true
+  enable_model_versioning: true
+  enable_model_monitoring: true
+  enable_forecast_band: true
+  enable_backtesting: true
+  enable_cross_validation: true
+  
+  # AI features
+  enable_ai_insights: true
+  enable_ai_recommendations: true
+  enable_openai_test_button: true
+  enable_embeddings: false
+  
+  # Export features
+  enable_html_export: true
+  enable_pdf_export: true
+  enable_excel_export: true
+  enable_api_export: false
+  
+  # Experimental features
+  enable_auto_ml: true
+  enable_neural_networks: false
+  enable_deep_learning: false
+  enable_reinforcement_learning: false
+  
+  # UI features
+  enable_dark_mode: true
+  enable_themes: true
+  enable_customization: true
+  enable_keyboard_shortcuts: true
+
+# ================================
+# MONITORING & TELEMETRY
+# ================================
+monitoring:
+  # Metrics
+  enable_metrics: true
+  metrics_port: 9090
+  metrics_path: "/metrics"
+  
+  # Health checks
+  enable_health_endpoint: true
+  health_check_interval: 60              # seconds
+  
+  # Performance
+  track_response_time: true
+  track_memory_usage: true
+  track_cpu_usage: true
+  
+  # Errors
+  track_errors: true
+  error_sampling_rate: 1.0               # 0.0 - 1.0
+  
+  # User analytics
+  track_user_actions: true
+  track_page_views: true
+  track_feature_usage: true
+  
+  # External services
+  sentry_enabled: false
+  sentry_dsn: ""
+  sentry_environment: "production"
+  sentry_traces_sample_rate: 0.1
+  
+  prometheus_enabled: false
+  prometheus_port: 9090
+  
+  datadog_enabled: false
+  datadog_api_key: ""
+
+# ================================
+# PERFORMANCE OPTIMIZATION
+# ================================
+performance:
+  # Caching
+  enable_result_caching: true
+  enable_query_caching: true
+  cache_size_mb: 1000
+  
+  # Parallelization
+  enable_parallel_processing: true
+  max_workers: 4
+  
+  # Memory management
+  gc_threshold: 0.8                      # Trigger GC at 80% memory
+  max_memory_mb: 4096
+  
+  # Database
+  db_pool_size: 10
+  db_pool_recycle: 3600
+  
+  # API
+  api_timeout: 30
+  api_max_retries: 3
+
+# ================================
+# DEVELOPMENT & DEBUGGING
+# ================================
+development:
+  # Debug mode
+  debug: false
+  verbose: false
+  profiling: false
+  
+  # Testing
+  test_mode: false
+  mock_ai_responses: false
+  mock_external_apis: false
+  
+  # Development tools
+  hot_reload: true
+  show_sql_queries: false
+  show_api_calls: false
+  
+  # Sample data
+  generate_sample_data: false
+  sample_data_size: 1000
+
+# ================================================================================================
+# END OF CONFIGURATION PRO++++
+# ================================================================================================

@@ -1,114 +1,559 @@
+# ========================================================================================
+# INTELLIGENT PREDICTOR PRO++++ - .gitignore
+# Comprehensive ignore rules for production-ready ML/AI application
+# ========================================================================================
+
 # ----------------------------
-# Python / Cache / Build
+# Python / Bytecode / Cache
 # ----------------------------
 __pycache__/
 *.py[cod]
+*$py.class
 *.pyd
 *.so
 *.dylib
+*.dll
 *.log
 *.tmp
 *.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Distribution / Packaging
 build/
+develop-eggs/
 dist/
+downloads/
+eggs/
 .eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
 *.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
 
 # ----------------------------
-# Virtualenv / Tools
+# Virtual Environments
 # ----------------------------
 .venv/
 venv/
 env/
+ENV/
+env.bak/
+venv.bak/
 .conda/
 .mamba/
-.mypy_cache/
-.pyre/
-.pytype/
-.ruff_cache/
+.pyenv/
+pythonenv*/
+
+# ----------------------------
+# Testing / Coverage
+# ----------------------------
 .pytest_cache/
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.junit/
+nosetests.xml
+test-results/
+*.cover
+*.log
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Linting
+.ruff_cache/
+.pylint.d/
+.flake8
 
 # ----------------------------
-# OS / IDE
+# IDE / Editors
 # ----------------------------
-.DS_Store
-Thumbs.db
-Desktop.ini
+# VSCode
 .vscode/
+*.code-workspace
+
+# PyCharm
 .idea/
 *.iml
+*.iws
+*.ipr
+.idea_modules/
 
-# ----------------------------
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
 # Jupyter
-# ----------------------------
 .ipynb_checkpoints/
 *.ipynb~*
+.jupyter/
+
+# Spyder
+.spyderproject
+.spyproject
+
+# ----------------------------
+# Operating System
+# ----------------------------
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+.nfs*
 
 # ----------------------------
 # Streamlit
 # ----------------------------
 .streamlit/secrets.toml
+.streamlit/*.json
+.streamlit/credentials.toml
 !.streamlit/config.toml
+.streamlit/cache/
 
 # ----------------------------
-# Secrets / Env
+# Environment Variables / Secrets
 # ----------------------------
 .env
 .env.*
+.env.local
+.env.*.local
 !.env.example
+!.env.template
+
+# API Keys / Credentials
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+secrets.json
+secrets.yaml
+secrets.yml
+*.secret
+*.secrets
 
 # ----------------------------
-# Data / Artefakty (zostawiamy strukturę przez .gitkeep)
+# Data Directories (preserve structure)
 # ----------------------------
+# Database
 data/app.db
-data/logs/
-data/raw/
-data/processed/
-data/exports/
-data/vector/
-!data/.gitkeep
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+
+# Logs
+data/logs/*.log
+data/logs/*.txt
 !data/logs/.gitkeep
+
+# Raw data (uploaded files)
+data/raw/*
 !data/raw/.gitkeep
+!data/raw/README.md
+
+# Processed data
+data/processed/*
 !data/processed/.gitkeep
+!data/processed/README.md
+
+# Exports
+data/exports/*
 !data/exports/.gitkeep
+!data/exports/README.md
+
+# Vector stores
+data/vector/*
 !data/vector/.gitkeep
 
-# ----------------------------
-# Modele / Rejestr
-# ----------------------------
-models/trained_models/
-models/registry.json
-!models/.gitkeep
-!models/trained_models/.gitkeep
+# Temporary data
+data/temp/*
+data/tmp/*
+!data/temp/.gitkeep
+
+# Backups
+data/backups/*
+!data/backups/.gitkeep
+
+# Keep main data directory
+!data/.gitkeep
+!data/README.md
 
 # ----------------------------
-# MLflow / Experiments
+# ML Models / Artifacts
+# ----------------------------
+# Trained models
+models/trained_models/*
+!models/trained_models/.gitkeep
+!models/trained_models/README.md
+
+# Model checkpoints
+models/checkpoints/*
+!models/checkpoints/.gitkeep
+
+# Model registry
+models/registry.json
+models/registry.json.bak
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.pb
+models/*.onnx
+models/*.pth
+models/*.pt
+
+# Model cache
+models/cache/*
+!models/cache/.gitkeep
+
+# Keep models directory structure
+!models/.gitkeep
+!models/README.md
+
+# ----------------------------
+# MLflow / Experiment Tracking
 # ----------------------------
 mlruns/
 mlartifacts/
+mlflow.db
+.mlflow/
+
+# Weights & Biases
+wandb/
+
+# TensorBoard
+runs/
+logs/
+tensorboard/
 
 # ----------------------------
-# ChromaDB (lokalny magazyn)
+# Vector Databases
 # ----------------------------
+# ChromaDB
 chroma/
-chroma/*
+chroma_db/
+*.chroma
+
+# Pinecone cache
+.pinecone/
+
+# Faiss indexes
+*.faiss
+*.index
 
 # ----------------------------
-# Raporty tymczasowe (poza assets/templates)
+# Reports / Exports (temporary)
 # ----------------------------
+# HTML reports
 report.html
+report_*.html
+*.report.html
+
+# PDF reports
+report.pdf
+report_*.pdf
+*.report.pdf
+
+# Excel exports
+export.xlsx
+export_*.xlsx
+*.export.xlsx
+
+# ZIP archives (temporary exports)
 export.zip
+export_*.zip
+data_export_*.zip
+
+# CSV exports (temporary)
+export.csv
+export_*.csv
+
+# Keep templates
+!assets/templates/**
+!assets/reports/**
 
 # ----------------------------
-# Node (na wszelki wypadek)
+# Cache Directories
 # ----------------------------
+.cache/
+cache/
+__cache__/
+.sass-cache/
+.parcel-cache/
+
+# Plotly cache
+.plotly/
+
+# Kaleido cache
+.kaleido/
+
+# ----------------------------
+# Documentation Build
+# ----------------------------
+docs/_build/
+docs/.doctrees/
+docs/_static/generated/
+site/
+.sphinx/
+
+# ----------------------------
+# Package Managers
+# ----------------------------
+# Node.js (if using any JS tools)
 node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm/
+.yarn/
+package-lock.json
+yarn.lock
+
+# Poetry
+poetry.lock
+.poetry/
+
+# Pipenv
+Pipfile.lock
 
 # ----------------------------
-# Lokalne konfiguracje prywatne
+# Docker
 # ----------------------------
+# Docker volumes
+.docker/
+docker-compose.override.yml
+.dockerignore
+
+# ----------------------------
+# CI/CD
+# ----------------------------
+.github/workflows/*.log
+.gitlab-ci-local/
+.circleci/
+
+# ----------------------------
+# Profiling / Performance
+# ----------------------------
+*.prof
+*.lprof
+profile_*.txt
+.profraw
+
+# Memory profiling
+*.mprof
+mprofile_*.dat
+
+# ----------------------------
+# Large Files / Binary Data
+# ----------------------------
+# Large CSV/data files (>100MB)
+*.csv
+!*sample*.csv
+!*demo*.csv
+!*example*.csv
+
+# Large Excel files
+*.xlsx
+!*sample*.xlsx
+!*demo*.xlsx
+!*template*.xlsx
+
+# Parquet files
+*.parquet
+
+# HDF5 files
+*.h5
+*.hdf5
+
+# Pickle files (can be large)
+*.pkl
+*.pickle
+
+# Archives
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+*.rar
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.mp3
+*.wav
+
+# Images (except small assets)
+# Uncomment if you have many large images
+# *.jpg
+# *.jpeg
+# *.png
+# *.gif
+# Keep specific directories
+!assets/images/**
+!assets/icons/**
+
+# ----------------------------
+# Databases
+# ----------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Redis dumps
+dump.rdb
+
+# ----------------------------
+# Monitoring / Logs
+# ----------------------------
+# Application logs
+*.log
+logs/*.log
+*.log.*
+
+# Error logs
+error.log
+error_*.log
+
+# Access logs
+access.log
+access_*.log
+
+# Debug logs
+debug.log
+debug_*.log
+
+# ----------------------------
+# Temporary Files
+# ----------------------------
+tmp/
+temp/
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# ----------------------------
+# Security Scanning
+# ----------------------------
+.bandit
+.safety
+.snyk
+
+# ----------------------------
+# Local Configuration
+# ----------------------------
+*.local
 *.local.*
+*.secret
 *.secret.*
+config.local.*
+settings.local.*
+
+# ----------------------------
+# Miscellaneous
+# ----------------------------
+# Core dumps
+core
+core.*
+
+# Compiled translations
+*.mo
+
+# Django migrations (if using Django)
+migrations/*.py
+!migrations/__init__.py
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMaker
+.sagemaker/
+
+# ----------------------------
+# Keep Essential Files
+# ----------------------------
+# Ensure these are NOT ignored
+!.gitkeep
+!README.md
+!LICENSE
+!requirements.txt
+!setup.py
+!pyproject.toml
+!Dockerfile
+!docker-compose.yml
+!.env.example
+!.env.template
+!assets/**
+!tests/**
+!docs/**
+!scripts/**
+
+# ========================================================================================
+# END OF .gitignore PRO++++
+# ========================================================================================

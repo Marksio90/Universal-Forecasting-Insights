@@ -1,0 +1,10 @@
+name: Universal-Forecasting-Insights
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip>=24.2
+  - nodejs>=18  # dla niektórych wtyczek streamlit/plotly (opcjonalne, ale pomaga)
+  - gcc                # na Linux; Windows to zignoruje
+  - pip:
+      - -r requirements.txt

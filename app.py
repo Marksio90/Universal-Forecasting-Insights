@@ -901,4 +901,370 @@ def render_health_status():
             for storage, info in health['storage'].items():
                 status = info['status']
                 icon = status_colors.get(status, '⚪')
-                st.markdown(
+                st.markdown(f"{icon} {storage.capitalize()}")
+                st.caption(info.get('message', 'Unknown'))
+        
+        # System Info
+        st.markdown("---")
+        st.markdown("**System Information**")
+        
+        col_sys1, col_sys2, col_sys3 = st.columns(3)
+        
+        with col_sys1:
+            import platform
+            st.markdown(f"**OS:** {platform.system()} {platform.release()}")
+            st.markdown(f"**Python:** {platform.python_version()}")
+        
+        with col_sys2:
+            import streamlit
+            st.markdown(f"**Streamlit:** {streamlit.__version__}")
+            st.markdown(f"**Pandas:** {pd.__version__}")
+        
+        with col_sys3:
+            uptime = datetime.now() - st.session_state.get('start_time', datetime.now())
+            hours, remainder = divmod(uptime.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            st.markdown(f"**Uptime:** {hours}h {minutes}m {seconds}s")
+
+
+# ========================================================================================
+# RECENT ACTIVITY
+# ========================================================================================
+
+def render_recent_activity():
+    """Render recent user activity."""
+    
+    recent_actions = st.session_state.get('recent_actions', [])
+    
+    if recent_actions:
+        with st.expander("📜 Recent Activity", expanded=False):
+            st.markdown("Ostatnie akcje w tej sesji:")
+            
+            # Show last 10 actions
+            for action in reversed(recent_actions[-10:]):
+                timestamp = action.get('timestamp', datetime.now())
+                action_type = action.get('action', 'unknown')
+                details = action.get('dataset', action.get('details', ''))
+                
+                time_str = timestamp.strftime("%H:%M:%S")
+                st.markdown(f"**{time_str}** - {action_type}: {details}")
+
+
+# ========================================================================================
+# QUICK ACTIONS
+# ========================================================================================
+
+def render_quick_actions():
+    """Render quick action buttons."""
+    
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("### ⚡ Quick Actions")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("📁 Upload New Data", use_container_width=True, type="primary"):
+            st.switch_page("pages/1_📤_Upload_Data.py")
+    
+    with col2:
+        if st.button("🔍 Explore Data", use_container_width=True):
+            if st.session_state.get('df') is not None:
+                st.switch_page("pages/2_📊_EDA_Analysis.py")
+            else:
+                st.warning("⚠️ Najpierw załaduj dane!")
+    
+    with col3:
+        if st.button("🤖 Train Model", use_container_width=True):
+            if st.session_state.get('df') is not None:
+                st.switch_page("pages/3_🎯_Predictions.py")
+            else:
+                st.warning("⚠️ Najpierw załaduj dane!")
+    
+    with col4:
+        if st.button("📈 Forecast", use_container_width=True):
+            if st.session_state.get('df') is not None:
+                st.switch_page("pages/4_📊_Forecasting.py")
+            else:
+                st.warning("⚠️ Najpierw załaduj dane!")
+
+
+# ========================================================================================
+# ONBOARDING WIZARD
+# ========================================================================================
+
+def render_onboarding():
+    """Render first-time user onboarding."""
+    
+    if st.session_state.get('first_visit', True):
+        with st.container():
+            st.info("""
+            👋 **Witaj w Intelligent Predictor PRO!**
+            
+            Pierwszy raz tutaj? Oto krótki przewodnik:
+            
+            1. **Załaduj dane** - Użyj przycisku "Upload Data" lub wybierz dane demo
+            2. **Eksploruj** - Przejdź do "EDA Analysis" aby zrozumieć swoje dane
+            3. **Modeluj** - Użyj "Predictions" do trenowania modeli ML
+            4. **Prognozuj** - W "Forecasting" stwórz prognozy czasowe
+            
+            💡 Tip: Najedź na ikony ℹ️ aby zobaczyć więcej informacji
+            """)
+            
+            col1, col2 = st.columns([3, 1])
+            with col2:
+                if st.button("Nie pokazuj więcej", key="hide_onboarding"):
+                    st.session_state['first_visit'] = False
+                    st.rerun()
+
+
+# ========================================================================================
+# DOCUMENTATION LINKS
+# ========================================================================================
+
+def render_documentation():
+    """Render documentation and help links."""
+    
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    st.markdown("### 📚 Dokumentacja & Pomoc")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown("""
+        **📖 Dokumentacja**
+        - [Quick Start Guide](https://docs.intelligent-predictor.io/quickstart)
+        - [API Reference](https://docs.intelligent-predictor.io/api)
+        - [Tutorials](https://docs.intelligent-predictor.io/tutorials)
+        """)
+    
+    with col2:
+        st.markdown("""
+        **💡 Przykłady**
+        - [Data Analysis](https://docs.intelligent-predictor.io/examples/eda)
+        - [ML Models](https://docs.intelligent-predictor.io/examples/ml)
+        - [Forecasting](https://docs.intelligent-predictor.io/examples/forecast)
+        """)
+    
+    with col3:
+        st.markdown("""
+        **🔧 Wsparcie**
+        - [FAQ](https://docs.intelligent-predictor.io/faq)
+        - [Troubleshooting](https://docs.intelligent-predictor.io/troubleshooting)
+        - [Report Bug](https://github.com/your-org/intelligent-predictor/issues)
+        """)
+    
+    with col4:
+        st.markdown("""
+        **🌟 Community**
+        - [GitHub](https://github.com/your-org/intelligent-predictor)
+        - [Discussions](https://github.com/your-org/intelligent-predictor/discussions)
+        - [Discord](https://discord.gg/intelligent-predictor)
+        """)
+
+
+# ========================================================================================
+# KEYBOARD SHORTCUTS
+# ========================================================================================
+
+def render_keyboard_shortcuts():
+    """Render keyboard shortcuts info."""
+    
+    with st.expander("⌨️ Keyboard Shortcuts", expanded=False):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **Navigation**
+            - `Ctrl + K` - Quick search
+            - `Ctrl + /` - Toggle sidebar
+            - `Ctrl + R` - Reload page
+            """)
+        
+        with col2:
+            st.markdown("""
+            **Actions**
+            - `Ctrl + U` - Upload data
+            - `Ctrl + E` - EDA Analysis
+            - `Ctrl + M` - Train model
+            """)
+
+
+# ========================================================================================
+# PERFORMANCE METRICS
+# ========================================================================================
+
+def render_performance_metrics():
+    """Render performance metrics."""
+    
+    with st.expander("📊 Performance Metrics", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Session duration
+            if 'start_time' in st.session_state:
+                duration = datetime.now() - st.session_state['start_time']
+                st.metric("Session Duration", f"{duration.seconds // 60} min")
+        
+        with col2:
+            # Actions count
+            actions = len(st.session_state.get('recent_actions', []))
+            st.metric("Actions Performed", actions)
+        
+        with col3:
+            # Data loaded
+            if st.session_state.get('df') is not None:
+                df = st.session_state['df']
+                size_mb = df.memory_usage(deep=True).sum() / 1e6
+                st.metric("Data Loaded", f"{size_mb:.1f} MB")
+            else:
+                st.metric("Data Loaded", "No data")
+
+
+# ========================================================================================
+# FOOTER
+# ========================================================================================
+
+def render_footer():
+    """Render footer with links and credits."""
+    
+    st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="footer">
+        <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">
+            © 2024 Intelligent Predictor PRO
+        </p>
+        <p style="color: #94a3b8; margin-bottom: 1rem;">
+            Zbudowano z ❤️ używając Python & Streamlit
+        </p>
+        <p style="font-size: 0.95rem;">
+            <a href="https://github.com/your-org/intelligent-predictor" target="_blank">
+                GitHub
+            </a> • 
+            <a href="https://docs.intelligent-predictor.io" target="_blank">
+                Dokumentacja
+            </a> • 
+            <a href="https://docs.intelligent-predictor.io/api" target="_blank">
+                API
+            </a> • 
+            <a href="mailto:support@intelligent-predictor.io">
+                Kontakt
+            </a> • 
+            <a href="https://docs.intelligent-predictor.io/privacy" target="_blank">
+                Privacy Policy
+            </a>
+        </p>
+        <p style="font-size: 0.85rem; color: #6B7280; margin-top: 1rem;">
+            Version 2.0.0 PRO++++ • Updated: 2024-10-09
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# ========================================================================================
+# MAIN APPLICATION
+# ========================================================================================
+
+def main():
+    """Main application entry point."""
+    
+    try:
+        # Initialize
+        init_session_state()
+        load_custom_css()
+        
+        # Render sections
+        render_hero()
+        
+        render_onboarding()
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        render_quick_start()
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        render_demo_section()
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        render_session_preview()
+        
+        render_quick_actions()
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        render_capabilities()
+        
+        render_tech_stack()
+        
+        render_documentation()
+        
+        # Collapsible sections
+        col_exp1, col_exp2 = st.columns(2)
+        
+        with col_exp1:
+            render_health_status()
+            render_keyboard_shortcuts()
+        
+        with col_exp2:
+            render_recent_activity()
+            render_performance_metrics()
+        
+        # Footer
+        render_footer()
+        
+        # Log page view
+        log.info("Landing page rendered successfully")
+        
+    except Exception as e:
+        log.error(f"Error rendering landing page: {e}", exc_info=True)
+        st.error(f"Wystąpił błąd podczas ładowania strony: {e}")
+        
+        if st.button("🔄 Reload Page"):
+            st.rerun()
+
+
+# ========================================================================================
+# ERROR HANDLING
+# ========================================================================================
+
+def handle_error(error: Exception):
+    """Global error handler."""
+    
+    log.error(f"Application error: {error}", exc_info=True)
+    
+    st.error("⚠️ Wystąpił nieoczekiwany błąd")
+    
+    with st.expander("🔍 Error Details", expanded=False):
+        st.code(str(error))
+        
+        import traceback
+        st.code(traceback.format_exc())
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🔄 Restart Application"):
+            st.session_state.clear()
+            st.rerun()
+    
+    with col2:
+        if st.button("📧 Report Issue"):
+            st.info("""
+            Please report this issue at:
+            https://github.com/your-org/intelligent-predictor/issues
+            
+            Include the error details shown above.
+            """)
+
+
+# ========================================================================================
+# ENTRY POINT
+# ========================================================================================
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        handle_error(e)

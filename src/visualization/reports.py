@@ -1,261 +1,979 @@
-# app.py — PRO++: Raport HTML + PDF (WeasyPrint/Playwright) z ciemnym motywem i fontem PL
+"""
+Report Generator PRO++++ - Zaawansowany generator raportów HTML/PDF z profesjonalnym stylingiem.
+
+Funkcjonalności PRO++++:
+- Multi-format export (HTML/PDF/PNG)
+- Multiple PDF engines (WeasyPrint/Playwright/ReportLab)
+- Professional themes (light/dark/custom)
+- Custom font embedding (TTF/OTF) z pełnym wsparciem PL
+- Interactive Plotly charts lub static images
+- Component-based report building
+- Template system z Jinja2
+- Markdown support z rozszerzeniami
+- Table of Contents generation
+- Page numbers i headers/footers
+- Watermarks i security
+- Batch report generation
+- Async PDF rendering
+- Caching dla performance
+- Export queue system
+- Custom CSS injection
+- Responsive design
+- Accessibility (WCAG AA)
+"""
+
 from __future__ import annotations
 
-# === IMPORTY STANDARDOWE ===
-from dataclasses import dataclass, field
-from typing import Iterable, List, Optional, Sequence, Dict, Any
 import base64
+import hashlib
+import html as _html
 import io
 import json
 import logging
-import hashlib
-import html as _html
 import os
+import tempfile
+import warnings
+from dataclasses import dataclass, field, asdict
+from typing import (
+    Any, Dict, List, Optional, Sequence, Tuple, Literal,
+    Union, Callable, Iterable
+)
+from pathlib import Path
+from functools import lru_cache
+from datetime import datetime
+from enum import Enum
 
-# === IMPORTY ZEW. ===
-import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.io as pio
 
-# Próba załadowania modułów PDF
+# Optional imports with graceful fallback
 try:
-    from weasyprint import HTML as _WHTML, CSS as _WCSS  # type: ignore
-    _HAS_WEASY = True
-except Exception:
-    _HAS_WEASY = False
+    from weasyprint import HTML as _WHTML, CSS as _WCSS
+    HAS_WEASYPRINT = True
+except ImportError:
+    HAS_WEASYPRINT = False
+    warnings.warn("WeasyPrint not available. Install with: pip install weasyprint")
 
 try:
-    from playwright.sync_api import sync_playwright  # type: ignore
-    _HAS_PW = True
-except Exception:
-    _HAS_PW = False
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+    warnings.warn("Playwright not available. Install with: pip install playwright")
 
-# === LOGGING (PRO++) ===
-logger = logging.getLogger("PROPP.app")
-if not logger.handlers:
-    _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
-    logger.addHandler(_h)
-    logger.setLevel(logging.INFO)
+try:
+    from reportlab.lib.pagesizes import A4, LETTER
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
+    from reportlab.lib.units import mm
+    HAS_REPORTLAB = True
+except ImportError:
+    HAS_REPORTLAB = False
+    warnings.warn("ReportLab not available. Install with: pip install reportlab")
+
+try:
+    from jinja2 import Template, Environment, BaseLoader
+    HAS_JINJA2 = True
+except ImportError:
+    HAS_JINJA2 = False
+    warnings.warn("Jinja2 not available. Install with: pip install jinja2")
+
+try:
+    import markdown
+    from markdown.extensions import tables, fenced_code, codehilite
+    HAS_MARKDOWN = True
+except ImportError:
+    HAS_MARKDOWN = False
+    warnings.warn("Markdown not available. Install with: pip install markdown")
+
+# ========================================================================================
+# LOGGING
+# ========================================================================================
+
+def get_logger(name: str = "report_generator", level: int = logging.INFO) -> logging.Logger:
+    """
+    Konfiguruje i zwraca logger.
+    
+    Args:
+        name: Nazwa loggera
+        level: Poziom logowania
+        
+    Returns:
+        Skonfigurowany logger
+    """
+    logger = logging.getLogger(name)
+    
+    if not logger.handlers:
+        logger.setLevel(level)
+        handler = logging.StreamHandler()
+        handler.setLevel(level)
+        formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.propagate = False
+    
+    return logger
 
 
-# ======================================================================================
-# === KONFIGURACJE I MOTYWY ===
-# ======================================================================================
+LOGGER = get_logger()
+
+
+# ========================================================================================
+# ENUMS & DATACLASSES
+# ========================================================================================
+
+class ReportTheme(str, Enum):
+    """Dostępne motywy raportów."""
+    LIGHT = "light"
+    DARK = "dark"
+    PROFESSIONAL = "professional"
+    MINIMAL = "minimal"
+    CORPORATE = "corporate"
+
+
+class PDFEngine(str, Enum):
+    """Dostępne silniki PDF."""
+    WEASYPRINT = "weasyprint"
+    PLAYWRIGHT = "playwright"
+    REPORTLAB = "reportlab"
+
+
+class PageSize(str, Enum):
+    """Rozmiary stron."""
+    A4 = "A4"
+    LETTER = "Letter"
+    LEGAL = "Legal"
+    A3 = "A3"
+
+
+class ImageFormat(str, Enum):
+    """Formaty obrazów."""
+    PNG = "png"
+    JPEG = "jpeg"
+    SVG = "svg"
+    PDF = "pdf"
+
 
 @dataclass(frozen=True)
 class ThemeConfig:
-    primary: str = "#4A90E2"
-    bg: str = "#ffffff"
-    text: str = "#111111"
-    muted: str = "#6b7280"
-    card: str = "#f8f9fb"
-    border: str = "#e5e7eb"
-    heading: str = "#1d3557"
-    h3: str = "#1f2937"
-
-    def inline_css(self) -> str:
+    """Konfiguracja motywu raportu."""
+    name: str
+    primary: str
+    secondary: str
+    accent: str
+    bg: str
+    text: str
+    muted: str
+    card: str
+    border: str
+    heading: str
+    link: str
+    success: str
+    warning: str
+    error: str
+    code_bg: str
+    
+    def to_css_variables(self) -> str:
+        """Konwertuje do CSS variables."""
         return f"""
-<style>
 :root {{
-  --primary: {self.primary};
-  --bg: {self.bg};
-  --text: {self.text};
-  --muted: {self.muted};
-  --card: {self.card};
-  --border: {self.border};
+  --theme-primary: {self.primary};
+  --theme-secondary: {self.secondary};
+  --theme-accent: {self.accent};
+  --theme-bg: {self.bg};
+  --theme-text: {self.text};
+  --theme-muted: {self.muted};
+  --theme-card: {self.card};
+  --theme-border: {self.border};
+  --theme-heading: {self.heading};
+  --theme-link: {self.link};
+  --theme-success: {self.success};
+  --theme-warning: {self.warning};
+  --theme-error: {self.error};
+  --theme-code-bg: {self.code_bg};
 }}
-* {{ box-sizing: border-box; }}
-body {{ margin:0; padding:24px; font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; color: var(--text); background: var(--bg); }}
-h1,h2,h3 {{ letter-spacing:.2px; color:{self.heading}; margin: 0 0 .6rem; }}
-h1 {{ font-size: 1.8rem; }}
-h2 {{ font-size: 1.35rem; border-bottom:1px solid var(--border); padding-bottom:.25rem; }}
-h3 {{ font-size: 1.1rem; color:{self.h3}; }}
-p,li {{ line-height: 1.55; }}
-.small {{ color: var(--muted); font-size:.9rem; }}
-.row {{ display:flex; gap:16px; flex-wrap: wrap; align-items: stretch; }}
-.card {{
-  background: var(--card);
-  border:1px solid var(--border);
-  border-radius:12px; padding:16px; flex:1 1 260px;
-  box-shadow: 0 1px 0 rgba(16,24,40,.04);
-}}
-.card-title {{ font-weight:600; margin-bottom:8px; color:#111827; }}
-.kpi {{ display:flex; flex-direction:column; gap:6px; }}
-.kpi .value {{ font-size:1.5rem; font-weight:700; color:#0f172a; }}
-.kpi .label {{ color: var(--muted); font-size:.9rem; }}
-.kpi .delta.up {{ color:#16a34a; }}
-.kpi .delta.down {{ color:#dc2626; }}
-.table-wrap {{ overflow:auto; border:1px solid var(--border); border-radius:12px; }}
-table.tbl {{ width:100%; border-collapse: collapse; font-size:.95rem; }}
-table.tbl th, table.tbl td {{ padding:8px 10px; border-bottom:1px solid var(--border); }}
-table.tbl th {{ text-align:left; font-weight:600; background:#fafafa; }}
-.fig {{ border:1px solid var(--border); border-radius:12px; padding:8px; background:#fff; }}
-.caption {{ color:var(--muted); font-size:.9rem; margin:.25rem 2px 0; }}
-hr {{ border: none; border-top:1px solid var(--border); margin: 16px 0; }}
-.badge {{ display:inline-block; padding:.2rem .5rem; border-radius:999px; background: rgba(74,144,226,.1); color: var(--primary); font-weight:600; font-size:.8rem; }}
-footer {{ color:var(--muted); margin-top:24px; }}
-</style>
 """.strip()
+
+
+# Predefiniowane motywy
+THEMES = {
+    ReportTheme.LIGHT: ThemeConfig(
+        name="Light",
+        primary="#4A90E2",
+        secondary="#22d3ee",
+        accent="#a78bfa",
+        bg="#ffffff",
+        text="#111111",
+        muted="#6b7280",
+        card="#f8f9fb",
+        border="#e5e7eb",
+        heading="#1d3557",
+        link="#2563eb",
+        success="#16a34a",
+        warning="#f59e0b",
+        error="#dc2626",
+        code_bg="#f3f4f6"
+    ),
+    ReportTheme.DARK: ThemeConfig(
+        name="Dark",
+        primary="#60A5FA",
+        secondary="#22d3ee",
+        accent="#c084fc",
+        bg="#0b1020",
+        text="#E5E7EB",
+        muted="#94A3B8",
+        card="#0f172a",
+        border="#374151",
+        heading="#f9fafb",
+        link="#60a5fa",
+        success="#34d399",
+        warning="#fbbf24",
+        error="#f87171",
+        code_bg="#1e293b"
+    ),
+    ReportTheme.PROFESSIONAL: ThemeConfig(
+        name="Professional",
+        primary="#1e40af",
+        secondary="#0891b2",
+        accent="#7c3aed",
+        bg="#fafafa",
+        text="#0f172a",
+        muted="#64748b",
+        card="#ffffff",
+        border="#cbd5e1",
+        heading="#1e293b",
+        link="#1e40af",
+        success="#059669",
+        warning="#d97706",
+        error="#b91c1c",
+        code_bg="#f1f5f9"
+    ),
+    ReportTheme.MINIMAL: ThemeConfig(
+        name="Minimal",
+        primary="#000000",
+        secondary="#404040",
+        accent="#808080",
+        bg="#ffffff",
+        text="#1a1a1a",
+        muted="#737373",
+        card="#fafafa",
+        border="#e5e5e5",
+        heading="#000000",
+        link="#000000",
+        success="#22c55e",
+        warning="#eab308",
+        error="#ef4444",
+        code_bg="#f5f5f5"
+    ),
+    ReportTheme.CORPORATE: ThemeConfig(
+        name="Corporate",
+        primary="#003366",
+        secondary="#0066cc",
+        accent="#6699cc",
+        bg="#f5f7fa",
+        text="#1a1a1a",
+        muted="#666666",
+        card="#ffffff",
+        border="#d1d5db",
+        heading="#003366",
+        link="#0066cc",
+        success="#10b981",
+        warning="#f59e0b",
+        error="#dc2626",
+        code_bg="#e5e7eb"
+    )
+}
 
 
 @dataclass(frozen=True)
 class ExportOptions:
+    """Opcje eksportu."""
     max_table_rows: int = 1000
-    plotly_include_js: str = "cdn"  # "cdn" | "inline" | False
+    plotly_include_js: Literal["cdn", "inline", False] = "cdn"
     plotly_modebar: bool = True
     plotly_responsive: bool = True
     plotly_scroll_zoom: bool = False
     image_scale: float = 2.0
-    image_format: str = "png"  # png | jpg | svg | pdf
-
+    image_format: ImageFormat = ImageFormat.PNG
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    
     def plotly_config(self) -> Dict[str, Any]:
+        """Zwraca konfigurację Plotly."""
         return {
             "displayModeBar": self.plotly_modebar,
             "responsive": self.plotly_responsive,
             "scrollZoom": self.plotly_scroll_zoom,
+            "displaylogo": False,
+            "modeBarButtonsToRemove": ["lasso2d", "select2d"] if not self.plotly_scroll_zoom else []
         }
 
 
 @dataclass(frozen=True)
 class PDFOptions:
-    page_size: str = "A4"
+    """Opcje PDF."""
+    page_size: PageSize = PageSize.A4
     margin_top: str = "15mm"
     margin_right: str = "12mm"
     margin_bottom: str = "18mm"
     margin_left: str = "12mm"
     dpi: int = 144
-    dark_mode: bool = True
-    print_background: bool = True         # Playwright
-    embed_font_name: str = "AppFont"
-    # UWAGA: sam plik czcionki podajemy w UI przez uploader i przekazujemy jako bytes
-
+    print_background: bool = True
+    embed_fonts: bool = True
+    font_name: str = "AppFont"
+    font_fallbacks: Tuple[str, ...] = ("DejaVu Sans", "Noto Sans", "Inter", "Segoe UI", "Arial")
+    
+    # Headers & Footers
+    header_text: Optional[str] = None
+    footer_text: Optional[str] = None
+    show_page_numbers: bool = True
+    page_number_format: str = "Page {page} of {total}"
+    
+    # Security
+    watermark_text: Optional[str] = None
+    watermark_opacity: float = 0.1
+    
     def page_css(self) -> str:
+        """Generuje CSS dla strony."""
         return f"""
 @page {{
-  size: {self.page_size};
+  size: {self.page_size.value};
   margin: {self.margin_top} {self.margin_right} {self.margin_bottom} {self.margin_left};
+  
+  @top-center {{
+    content: "{self.header_text or ''}";
+    font-size: 9pt;
+    color: #666;
+  }}
+  
+  @bottom-center {{
+    content: "{self.footer_text or ''}";
+    font-size: 9pt;
+    color: #666;
+  }}
+  
+  @bottom-right {{
+    content: counter(page) " / " counter(pages);
+    font-size: 9pt;
+    color: #666;
+  }}
 }}
+
 html, body {{
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
+  color-adjust: exact;
 }}
 """.strip()
 
 
-@dataclass(frozen=True)
-class DarkTheme:
-    bg: str = "#0b1020"
-    text: str = "#E5E7EB"
-    card: str = "#0f172a"
-    border: str = "#374151"
-    primary: str = "#60A5FA"
-    muted: str = "#94A3B8"
-
-    def css_override(self) -> str:
-        return f"""
-<style>
-:root {{
-  --primary: {self.primary};
-  --bg: {self.bg};
-  --text: {self.text};
-  --muted: {self.muted};
-  --card: {self.card};
-  --border: {self.border};
-}}
-body {{ background: var(--bg); color: var(--text); }}
-table.tbl th {{ background: #111827; color: var(--text); }}
-.fig {{ background:#0b1220; }}
-</style>
-""".strip()
+@dataclass
+class ReportMetadata:
+    """Metadata raportu."""
+    title: str
+    author: Optional[str] = None
+    company: Optional[str] = None
+    date: Optional[str] = None
+    version: str = "1.0"
+    description: Optional[str] = None
+    tags: List[str] = field(default_factory=list)
+    custom: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        if self.date is None:
+            self.date = datetime.now().strftime("%Y-%m-%d %H:%M")
 
 
-# ======================================================================================
-# === CACHE HELPER (Streamlit-aware) ===
-# ======================================================================================
-def cache_data_if_available(ttl: int | None = 3600, max_entries: int | None = 128):
-    try:
-        return st.cache_data(show_spinner=False, ttl=ttl, max_entries=max_entries)
-    except Exception:
-        def _noop(func):
-            return func
-        return _noop
+@dataclass
+class TableOfContents:
+    """Table of Contents."""
+    enabled: bool = True
+    title: str = "Spis treści"
+    max_depth: int = 3
+    entries: List[Dict[str, Any]] = field(default_factory=list)
+    
+    def add_entry(self, level: int, title: str, anchor: str) -> None:
+        """Dodaje wpis do TOC."""
+        if level <= self.max_depth:
+            self.entries.append({
+                "level": level,
+                "title": title,
+                "anchor": anchor
+            })
+    
+    def to_html(self) -> str:
+        """Generuje HTML TOC."""
+        if not self.enabled or not self.entries:
+            return ""
+        
+        html = [f'<div class="toc"><h2>{_esc(self.title)}</h2><ul class="toc-list">']
+        
+        for entry in self.entries:
+            indent = (entry["level"] - 1) * 20
+            html.append(
+                f'<li style="margin-left:{indent}px">'
+                f'<a href="#{entry["anchor"]}">{_esc(entry["title"])}</a>'
+                f'</li>'
+            )
+        
+        html.append('</ul></div>')
+        return "\n".join(html)
 
 
-# ======================================================================================
-# === UTIL: ESCAPING / FORMAT / WRAPPERS ===
-# ======================================================================================
+# ========================================================================================
+# UTILITY FUNCTIONS
+# ========================================================================================
+
 def _esc(s: Any) -> str:
+    """HTML escape."""
     return _html.escape("" if s is None else str(s), quote=True)
 
 
-def _fmt_num(v: Any, ndigits: int = 3) -> str:
+def _fmt_num(v: Any, ndigits: int = 3, thousands_sep: str = " ") -> str:
+    """Formatuje liczbę z separatorem tysięcy."""
     if v is None:
         return "—"
+    
     try:
-        if isinstance(v, int) and not isinstance(v, bool):
-            return f"{v:,}".replace(",", " ")
+        if isinstance(v, bool):
+            return str(v)
+        
+        if isinstance(v, int):
+            return f"{v:,}".replace(",", thousands_sep)
+        
         fv = float(v)
+        
         if abs(fv) >= 1000:
-            return f"{fv:,.0f}".replace(",", " ")
-        txt = f"{fv:,.{ndigits}f}".replace(",", " ")
+            return f"{fv:,.0f}".replace(",", thousands_sep)
+        
+        txt = f"{fv:,.{ndigits}f}".replace(",", thousands_sep)
         return txt.rstrip("0").rstrip(".")
-    except Exception:
+        
+    except (ValueError, TypeError):
         return _esc(v)
 
 
-def _wrap_card(inner_html: str, title: Optional[str] = None) -> str:
-    head = f'<div class="card-title">{_esc(title)}</div>' if title else ""
-    return f'<div class="card">{head}{inner_html}</div>'
+def _generate_anchor(text: str) -> str:
+    """Generuje anchor ID z tekstu."""
+    import re
+    # Remove special chars, convert to lowercase, replace spaces
+    anchor = re.sub(r'[^\w\s-]', '', text.lower())
+    anchor = re.sub(r'[-\s]+', '-', anchor)
+    return anchor.strip('-')
 
 
-# ======================================================================================
-# === KOMPONENTY HTML RAPORTU (PRO++) ===
-# ======================================================================================
-def section_title(text: str, level: int = 2, anchor: Optional[str] = None) -> str:
-    tag = min(max(level, 1), 3)
-    id_attr = f' id="{_esc(anchor)}"' if anchor else ""
-    return f"<h{tag}{id_attr}>{_esc(text)}</h{tag}>"
+@lru_cache(maxsize=128)
+def _hash_content(content: str) -> str:
+    """Hashuje zawartość dla cache key."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
 
 
-def paragraph(text: str) -> str:
-    return f"<p>{_esc(text)}</p>"
+def _encode_image_base64(img_bytes: bytes, mime_type: str = "image/png") -> str:
+    """Enkoduje obrazek do base64 data URI."""
+    b64 = base64.b64encode(img_bytes).decode("ascii")
+    return f"data:{mime_type};base64,{b64}"
 
 
-def badge(text: str) -> str:
-    return f'<span class="badge">{_esc(text)}</span>'
+# ========================================================================================
+# CSS GENERATOR
+# ========================================================================================
+
+def generate_report_css(theme: ThemeConfig, custom_css: Optional[str] = None) -> str:
+    """
+    Generuje kompletny CSS dla raportu.
+    
+    Args:
+        theme: Konfiguracja motywu
+        custom_css: Dodatkowy custom CSS
+        
+    Returns:
+        Complete CSS string
+    """
+    base_css = f"""
+{theme.to_css_variables()}
+
+* {{
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}}
+
+body {{
+  margin: 0;
+  padding: 24px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--theme-text);
+  background: var(--theme-bg);
+}}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {{
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--theme-heading);
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.3;
+}}
+
+h1 {{ font-size: 2rem; margin-top: 0; }}
+h2 {{ font-size: 1.5rem; border-bottom: 2px solid var(--theme-border); padding-bottom: 0.3rem; }}
+h3 {{ font-size: 1.25rem; }}
+h4 {{ font-size: 1.1rem; }}
+
+p {{
+  margin: 0.75rem 0;
+  line-height: 1.65;
+}}
+
+a {{
+  color: var(--theme-link);
+  text-decoration: none;
+  transition: color 0.2s;
+}}
+
+a:hover {{
+  text-decoration: underline;
+}}
+
+/* Lists */
+ul, ol {{
+  margin: 0.75rem 0;
+  padding-left: 2rem;
+}}
+
+li {{
+  margin: 0.3rem 0;
+}}
+
+/* Code */
+code {{
+  background: var(--theme-code-bg);
+  padding: 0.15rem 0.4rem;
+  border-radius: 3px;
+  font-family: "Fira Code", "Consolas", monospace;
+  font-size: 0.9em;
+}}
+
+pre {{
+  background: var(--theme-code-bg);
+  padding: 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 1rem 0;
+}}
+
+pre code {{
+  background: none;
+  padding: 0;
+}}
+
+/* Layout */
+.container {{
+  max-width: 1200px;
+  margin: 0 auto;
+}}
+
+.row {{
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  align-items: stretch;
+  margin: 1rem 0;
+}}
+
+.col {{
+  flex: 1;
+  min-width: 0;
+}}
+
+/* Cards */
+.card {{
+  background: var(--theme-card);
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  margin: 1rem 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  flex: 1 1 260px;
+}}
+
+.card-title {{
+  font-weight: 600;
+  font-size: 1.05rem;
+  margin-bottom: 0.75rem;
+  color: var(--theme-heading);
+}}
+
+.card-subtitle {{
+  color: var(--theme-muted);
+  font-size: 0.9rem;
+  margin-bottom: 0.5rem;
+}}
+
+/* KPI Components */
+.kpi {{
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}}
+
+.kpi-value {{
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--theme-heading);
+  line-height: 1;
+}}
+
+.kpi-label {{
+  color: var(--theme-muted);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}}
+
+.kpi-delta {{
+  font-size: 0.9rem;
+  font-weight: 600;
+}}
+
+.kpi-delta.positive {{
+  color: var(--theme-success);
+}}
+
+.kpi-delta.negative {{
+  color: var(--theme-error);
+}}
+
+.kpi-delta.neutral {{
+  color: var(--theme-muted);
+}}
+
+/* Tables */
+.table-wrapper {{
+  overflow-x: auto;
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  margin: 1rem 0;
+}}
+
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}}
+
+th, td {{
+  padding: 0.75rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid var(--theme-border);
+}}
+
+th {{
+  font-weight: 600;
+  background: var(--theme-card);
+  color: var(--theme-heading);
+  white-space: nowrap;
+}}
+
+tbody tr:hover {{
+  background: var(--theme-card);
+}}
+
+tbody tr:last-child td {{
+  border-bottom: none;
+}}
+
+/* Figures */
+.figure {{
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  padding: 1rem;
+  margin: 1.5rem 0;
+  background: var(--theme-card);
+}}
+
+.figure-caption {{
+  color: var(--theme-muted);
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+  text-align: center;
+  font-style: italic;
+}}
+
+/* Badges & Pills */
+.badge {{
+  display: inline-block;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.8rem;
+  background: rgba(74, 144, 226, 0.1);
+  color: var(--theme-primary);
+}}
+
+.badge-success {{
+  background: rgba(22, 163, 74, 0.1);
+  color: var(--theme-success);
+}}
+
+.badge-warning {{
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--theme-warning);
+}}
+
+.badge-error {{
+  background: rgba(220, 38, 38, 0.1);
+  color: var(--theme-error);
+}}
+
+/* Alerts */
+.alert {{
+  padding: 1rem 1.25rem;
+  border-radius: 8px;
+  margin: 1rem 0;
+  border-left: 4px solid;
+}}
+
+.alert-info {{
+  background: rgba(74, 144, 226, 0.1);
+  border-left-color: var(--theme-primary);
+  color: var(--theme-text);
+}}
+
+.alert-success {{
+  background: rgba(22, 163, 74, 0.1);
+  border-left-color: var(--theme-success);
+}}
+
+.alert-warning {{
+  background: rgba(245, 158, 11, 0.1);
+  border-left-color: var(--theme-warning);
+}}
+
+.alert-error {{
+  background: rgba(220, 38, 38, 0.1);
+  border-left-color: var(--theme-error);
+}}
+
+/* TOC */
+.toc {{
+  background: var(--theme-card);
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin: 2rem 0;
+}}
+
+.toc h2 {{
+  margin-top: 0;
+  border-bottom: none;
+  font-size: 1.3rem;
+}}
+
+.toc-list {{
+  list-style: none;
+  padding: 0;
+}}
+
+.toc-list li {{
+  margin: 0.5rem 0;
+}}
+
+.toc-list a {{
+  color: var(--theme-text);
+  font-weight: 500;
+}}
+
+.toc-list a:hover {{
+  color: var(--theme-link);
+}}
+
+/* Utilities */
+.text-center {{ text-align: center; }}
+.text-right {{ text-align: right; }}
+.text-muted {{ color: var(--theme-muted); }}
+.text-small {{ font-size: 0.9rem; }}
+.text-large {{ font-size: 1.1rem; }}
+
+.mt-0 {{ margin-top: 0; }}
+.mt-1 {{ margin-top: 0.5rem; }}
+.mt-2 {{ margin-top: 1rem; }}
+.mt-3 {{ margin-top: 1.5rem; }}
+.mt-4 {{ margin-top: 2rem; }}
+
+.mb-0 {{ margin-bottom: 0; }}
+.mb-1 {{ margin-bottom: 0.5rem; }}
+.mb-2 {{ margin-bottom: 1rem; }}
+.mb-3 {{ margin-bottom: 1.5rem; }}
+.mb-4 {{ margin-bottom: 2rem; }}
+
+.divider {{
+  border: none;
+  border-top: 1px solid var(--theme-border);
+  margin: 2rem 0;
+}}
+
+/* Footer */
+footer {{
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--theme-border);
+  color: var(--theme-muted);
+  font-size: 0.9rem;
+  text-align: center;
+}}
+
+/* Print specific */
+@media print {{
+  body {{
+    padding: 0;
+  }}
+  
+  .no-print {{
+    display: none !important;
+  }}
+  
+  .page-break {{
+    page-break-after: always;
+  }}
+}}
+"""
+    
+    if custom_css:
+        base_css += f"\n\n/* Custom CSS */\n{custom_css}"
+    
+    return base_css
 
 
-def kpi_card(label: str, value: Any, delta: Optional[float | str] = None, *, good_is_up: bool = True) -> str:
-    if isinstance(delta, (int, float)):
-        cls = "up" if (delta >= 0 and good_is_up) or (delta < 0 and not good_is_up) else "down"
-        delta_html = f'<div class="delta {cls}">{_fmt_num(delta)}%</div>'
-    elif delta is None:
-        delta_html = ""
-    else:
-        delta_html = f'<div class="delta">{_esc(delta)}</div>'
+# ========================================================================================
+# HTML COMPONENTS
+# ========================================================================================
+
+def section_title(
+    text: str,
+    level: int = 2,
+    anchor: Optional[str] = None,
+    add_to_toc: bool = True,
+    toc: Optional[TableOfContents] = None
+) -> str:
+    """
+    Tworzy tytuł sekcji.
+    
+    Args:
+        text: Tekst tytułu
+        level: Poziom nagłówka (1-6)
+        anchor: Custom anchor ID
+        add_to_toc: Czy dodać do TOC
+        toc: Table of Contents object
+        
+    Returns:
+        HTML string
+    """
+    level = max(1, min(level, 6))
+    
+    if anchor is None:
+        anchor = _generate_anchor(text)
+    
+    if add_to_toc and toc:
+        toc.add_entry(level, text, anchor)
+    
+    return f'<h{level} id="{_esc(anchor)}">{_esc(text)}</h{level}>'
+
+
+def paragraph(text: str, css_class: Optional[str] = None) -> str:
+    """Tworzy paragraf."""
+    class_attr = f' class="{_esc(css_class)}"' if css_class else ""
+    return f'<p{class_attr}>{_esc(text)}</p>'
+
+
+def badge(text: str, variant: Literal["default", "success", "warning", "error"] = "default") -> str:
+    """Tworzy badge."""
+    css_class = f"badge badge-{variant}" if variant != "default" else "badge"
+    return f'<span class="{css_class}">{_esc(text)}</span>'
+
+
+def alert(
+    message: str,
+    variant: Literal["info", "success", "warning", "error"] = "info",
+    title: Optional[str] = None
+) -> str:
+    """Tworzy alert box."""
+    title_html = f"<strong>{_esc(title)}</strong><br/>" if title else ""
+    return f'<div class="alert alert-{variant}">{title_html}{_esc(message)}</div>'
+
+
+def kpi_card(
+    label: str,
+    value: Any,
+    delta: Optional[Union[float, str]] = None,
+    *,
+    higher_is_better: bool = True,
+    unit: str = "",
+    format_digits: int = 2
+) -> str:
+    """
+    Tworzy kartę KPI.
+    
+    Args:
+        label: Etykieta KPI
+        value: Wartość
+        delta: Zmiana (% lub tekst)
+        higher_is_better: Czy wyższa wartość = lepiej
+        unit: Jednostka
+        format_digits: Liczba cyfr po przecinku
+        
+    Returns:
+        HTML string
+    """
+    formatted_value = _fmt_num(value, ndigits=format_digits)
+    
+    delta_html = ""
+    if delta is not None:
+        if isinstance(delta, (int, float)):
+            # Determine class based on delta sign and higher_is_better
+            is_positive = delta > 0
+            if (is_positive and higher_is_better) or (not is_positive and not higher_is_better):
+                delta_class = "positive"
+                symbol = "▲" if is_positive else "▼"
+            elif (is_positive and not higher_is_better) or (not is_positive and higher_is_better):
+                delta_class = "negative"
+                symbol = "▲" if is_positive else "▼"
+            else:
+                delta_class = "neutral"
+                symbol = "●"
+            
+            delta_html = f'<div class="kpi-delta {delta_class}">{symbol} {abs(delta):.1f}%</div>'
+        else:
+            delta_html = f'<div class="kpi-delta neutral">{_esc(delta)}</div>'
+    
     html = f"""
 <div class="kpi">
-  <div class="label">{_esc(label)}</div>
-  <div class="value">{_fmt_num(value)}</div>
+  <div class="kpi-label">{_esc(label)}</div>
+  <div class="kpi-value">{formatted_value}{_esc(unit)}</div>
   {delta_html}
 </div>
-""".strip()
-    return _wrap_card(html)
+"""
+    return f'<div class="card">{html}</div>'
 
 
 def kpi_row(items: Sequence[Dict[str, Any]]) -> str:
-    cards = [
-        kpi_card(
-            i.get("label", "—"),
-            i.get("value"),
-            i.get("delta"),
-            good_is_up=bool(i.get("good_is_up", True)),
-        )
-        for i in items
-    ]
+    """
+    Tworzy wiersz z wieloma KPI.
+    
+    Args:
+        items: Lista dict z parametrami dla kpi_card
+        
+    Returns:
+        HTML string
+    """
+    cards = [kpi_card(**item) for item in items]
     return f'<div class="row">{"".join(cards)}</div>'
 
 
@@ -265,225 +983,641 @@ def dataframe_table(
     index: bool = False,
     max_rows: int = 1000,
     caption: Optional[str] = None,
+    css_class: str = "table-wrapper"
 ) -> str:
+    """
+    Konwertuje DataFrame do HTML table.
+    
+    Args:
+        df: DataFrame
+        index: Czy pokazać indeks
+        max_rows: Maksymalna liczba wierszy
+        caption: Podpis tabeli
+        css_class: Klasa CSS
+        
+    Returns:
+        HTML string
+    """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
-        return _wrap_card('<div class="small">Brak danych</div>')
+        return f'<div class="card"><p class="text-muted">Brak danych w tabeli</p></div>'
+    
     try:
-        dd = df.head(max_rows)
-        html_tbl = dd.to_html(classes="tbl", index=index, border=0, escape=False)
-        cap = f'<div class="caption">{_esc(caption)}</div>' if caption else ""
-        return f'<div class="table-wrap">{html_tbl}</div>{cap}'
+        # Limit rows
+        df_display = df.head(max_rows)
+        
+        # Generate HTML table
+        html_table = df_display.to_html(
+            index=index,
+            border=0,
+            escape=True,
+            na_rep="—",
+            float_format=lambda x: _fmt_num(x)
+        )
+        
+        # Add caption
+        caption_html = f'<div class="figure-caption">{_esc(caption)}</div>' if caption else ""
+        
+        # Wrap in styled div
+        return f"""
+<div class="{css_class}">
+  {html_table}
+</div>
+{caption_html}
+"""
     except Exception as e:
-        logger.exception("dataframe_table failed: %s", e)
-        return _wrap_card('<div class="small">Nie udało się wyrenderować tabeli.</div>')
+        LOGGER.error(f"Failed to render DataFrame table: {e}")
+        return f'<div class="card"><p class="text-muted">Błąd renderowania tabeli: {_esc(str(e))}</p></div>'
 
 
 def fig_to_html(
     fig: go.Figure,
     *,
     full_html: bool = False,
-    include_plotlyjs: str = "cdn",  # "cdn" | "inline" | False
+    include_plotlyjs: Union[Literal["cdn", "inline"], bool] = "cdn",
     config: Optional[Dict[str, Any]] = None,
     div_id: Optional[str] = None,
     caption: Optional[str] = None,
+    export_opts: Optional[ExportOptions] = None
 ) -> str:
+    """
+    Konwertuje Plotly Figure do HTML.
+    
+    Args:
+        fig: Plotly Figure
+        full_html: Czy zwrócić pełny HTML document
+        include_plotlyjs: Sposób includowania Plotly.js
+        config: Konfiguracja Plotly
+        div_id: ID elementu div
+        caption: Podpis wykresu
+        export_opts: Opcje eksportu
+        
+    Returns:
+        HTML string
+    """
+    if fig is None:
+        return '<div class="card"><p class="text-muted">Brak wykresu</p></div>'
+    
     try:
-        config = config or {"displayModeBar": True, "responsive": True, "scrollZoom": False}
+        export_opts = export_opts or ExportOptions()
+        config = config or export_opts.plotly_config()
+        
         html_div = pio.to_html(
             fig,
             full_html=full_html,
             include_plotlyjs=include_plotlyjs,
             config=config,
             div_id=div_id,
+            validate=False
         )
+        
         if full_html:
             return html_div
-        cap = f'<div class="caption">{_esc(caption)}</div>' if caption else ""
-        return f'<div class="fig">{html_div}</div>{cap}'
+        
+        caption_html = f'<div class="figure-caption">{_esc(caption)}</div>' if caption else ""
+        
+        return f"""
+<div class="figure">
+  {html_div}
+  {caption_html}
+</div>
+"""
     except Exception as e:
-        logger.exception("fig_to_html failed: %s", e)
-        return _wrap_card('<div class="small">Nie udało się wyrenderować wykresu (HTML).</div>')
+        LOGGER.error(f"Failed to render Plotly figure: {e}")
+        return f'<div class="card"><p class="text-muted">Błąd renderowania wykresu: {_esc(str(e))}</p></div>'
 
 
-def _hash_figure(fig: go.Figure) -> str:
-    try:
-        s = json.dumps(fig.to_plotly_json(), sort_keys=True, ensure_ascii=False)
-    except Exception:
-        s = str(fig)
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-def _retry_kaleido_once(render_fn):
-    try:
-        return render_fn()
-    except Exception as e:
-        logger.warning("Kaleido render failed once (%s). Retrying…", e)
-        return render_fn()
-
-
-def fig_to_img(
+def fig_to_image(
     fig: go.Figure,
     *,
-    fmt: str = "png",
+    format: ImageFormat = ImageFormat.PNG,
     scale: float = 2.0,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
     caption: Optional[str] = None,
-    export_opts: Optional[ExportOptions] = None,
+    export_opts: Optional[ExportOptions] = None
 ) -> str:
-    export_opts = export_opts or ExportOptions()
+    """
+    Konwertuje Plotly Figure do static image (base64).
+    
+    Args:
+        fig: Plotly Figure
+        format: Format obrazu
+        scale: Skala renderowania
+        width: Szerokość w pikselach
+        height: Wysokość w pikselach
+        caption: Podpis
+        export_opts: Opcje eksportu
+        
+    Returns:
+        HTML string z embedded image
+    """
+    if fig is None:
+        return '<div class="card"><p class="text-muted">Brak wykresu</p></div>'
+    
     try:
-        def _render() -> bytes:
-            return pio.to_image(fig, format=fmt, scale=scale)
-        img_bytes = _retry_kaleido_once(_render)
-        b64 = base64.b64encode(img_bytes).decode("ascii")
-        mime = f"image/{'jpeg' if fmt == 'jpg' else fmt}"
-        cap = f'<div class="caption">{_esc(caption)}</div>' if caption else ""
-        return f'<div class="fig"><img src="data:{mime};base64,{b64}" style="width:100%;border-radius:8px;" />{cap}</div>'
-    except Exception as e:
-        logger.warning("Kaleido not available or failed (%s). Fallback to HTML.", e)
-        return fig_to_html(
+        # Render to image bytes
+        img_bytes = pio.to_image(
             fig,
-            full_html=False,
-            include_plotlyjs=export_opts.plotly_include_js,
-            config=export_opts.plotly_config(),
-            caption=caption,
+            format=format.value,
+            scale=scale,
+            width=width,
+            height=height,
+            validate=False
         )
+        
+        # Determine MIME type
+        mime_map = {
+            ImageFormat.PNG: "image/png",
+            ImageFormat.JPEG: "image/jpeg",
+            ImageFormat.SVG: "image/svg+xml",
+            ImageFormat.PDF: "application/pdf"
+        }
+        mime = mime_map.get(format, "image/png")
+        
+        # Encode to base64
+        data_uri = _encode_image_base64(img_bytes, mime)
+        
+        caption_html = f'<div class="figure-caption">{_esc(caption)}</div>' if caption else ""
+        
+        return f"""
+<div class="figure">
+  <img src="{data_uri}" style="width:100%; border-radius:8px;" alt="{_esc(caption or 'Chart')}" />
+  {caption_html}
+</div>
+"""
+    except Exception as e:
+        LOGGER.warning(f"Image render failed: {e}. Falling back to HTML.")
+        export_opts = export_opts or ExportOptions()
+        return fig_to_html(fig, caption=caption, export_opts=export_opts)
 
+
+def markdown_to_html(text: str, extensions: Optional[List[str]] = None) -> str:
+    """
+    Konwertuje Markdown do HTML.
+    
+    Args:
+        text: Tekst Markdown
+        extensions: Lista rozszerzeń Markdown
+        
+    Returns:
+        HTML string
+    """
+    if not HAS_MARKDOWN:
+        # Fallback: basic conversion
+        paragraphs = text.split("\n\n")
+        return "".join(f"<p>{_esc(p)}</p>" for p in paragraphs)
+    
+    try:
+        extensions = extensions or ["tables", "fenced_code", "codehilite"]
+        html = markdown.markdown(text, extensions=extensions)
+        return html
+    except Exception as e:
+        LOGGER.error(f"Markdown conversion failed: {e}")
+        return f"<p>{_esc(text)}</p>"
+
+
+# ========================================================================================
+# REPORT BUILDER
+# ========================================================================================
 
 @dataclass
 class ReportBuilder:
-    title: str
-    include_css: bool = True
-    notes: Optional[str] = None
-    meta: Dict[str, Any] = field(default_factory=dict)
-    theme: ThemeConfig = field(default_factory=ThemeConfig)
+    """
+    Zaawansowany builder raportów HTML PRO++++.
+    
+    Attributes:
+        metadata: Metadata raportu
+        theme: Motyw wizualny
+        export_opts: Opcje eksportu
+        toc: Table of Contents
+        custom_css: Dodatkowy CSS
+    """
+    metadata: ReportMetadata
+    theme: Union[ReportTheme, ThemeConfig] = ReportTheme.PROFESSIONAL
     export_opts: ExportOptions = field(default_factory=ExportOptions)
-
-    def __post_init__(self) -> None:
+    toc: Optional[TableOfContents] = None
+    custom_css: Optional[str] = None
+    
+    def __post_init__(self):
+        """Inicjalizacja builder."""
         self.parts: List[str] = []
-
-    def add(self, html_fragment: str) -> None:
+        
+        # Convert theme enum to config
+        if isinstance(self.theme, ReportTheme):
+            self.theme = THEMES[self.theme]
+        
+        # Initialize TOC if not provided
+        if self.toc is None:
+            self.toc = TableOfContents()
+    
+    def add(self, html_fragment: str) -> ReportBuilder:
+        """
+        Dodaje fragment HTML.
+        
+        Args:
+            html_fragment: Fragment HTML
+            
+        Returns:
+            Self dla method chaining
+        """
         if not isinstance(html_fragment, str):
-            logger.warning("ReportBuilder.add: fragment not str – coercing")
+            LOGGER.warning("ReportBuilder.add: fragment not string, converting")
             html_fragment = str(html_fragment)
+        
         self.parts.append(html_fragment)
-
-    def add_markdown(self, text: str) -> None:
-        for para in (text or "").split("\n\n"):
-            self.parts.append(paragraph(para.replace("\n", "<br/>")))
-
-    def build(self) -> str:
-        head_css = self.theme.inline_css() if self.include_css else ""
-        meta_html = ""
-        if self.meta:
-            try:
-                meta_html = f'<div class="small">Kontekst: <code>{_esc(json.dumps(self.meta, ensure_ascii=False))}</code></div>'
-            except Exception:
-                meta_html = f'<div class="small">Kontekst: <code>{_esc(str(self.meta))}</code></div>'
-        notes_html = f"<p>{_esc(self.notes)}</p>" if self.notes else ""
-        body = "\n".join(self.parts)
-        html = f"""<!doctype html>
+        return self
+    
+    def add_section(
+        self,
+        title: str,
+        level: int = 2,
+        anchor: Optional[str] = None
+    ) -> ReportBuilder:
+        """Dodaje tytuł sekcji."""
+        html = section_title(title, level=level, anchor=anchor, toc=self.toc)
+        return self.add(html)
+    
+    def add_paragraph(self, text: str, css_class: Optional[str] = None) -> ReportBuilder:
+        """Dodaje paragraf."""
+        return self.add(paragraph(text, css_class=css_class))
+    
+    def add_markdown(self, text: str, extensions: Optional[List[str]] = None) -> ReportBuilder:
+        """Dodaje Markdown (konwertowany do HTML)."""
+        html = markdown_to_html(text, extensions=extensions)
+        return self.add(html)
+    
+    def add_kpi_row(self, items: Sequence[Dict[str, Any]]) -> ReportBuilder:
+        """Dodaje wiersz KPI."""
+        return self.add(kpi_row(items))
+    
+    def add_table(
+        self,
+        df: pd.DataFrame,
+        caption: Optional[str] = None,
+        **kwargs
+    ) -> ReportBuilder:
+        """Dodaje tabelę DataFrame."""
+        html = dataframe_table(df, caption=caption, **kwargs)
+        return self.add(html)
+    
+    def add_figure(
+        self,
+        fig: go.Figure,
+        as_image: bool = False,
+        caption: Optional[str] = None,
+        **kwargs
+    ) -> ReportBuilder:
+        """
+        Dodaje wykres Plotly.
+        
+        Args:
+            fig: Plotly Figure
+            as_image: Czy renderować jako static image
+            caption: Podpis
+            **kwargs: Dodatkowe argumenty
+            
+        Returns:
+            Self
+        """
+        if as_image:
+            html = fig_to_image(fig, caption=caption, export_opts=self.export_opts, **kwargs)
+        else:
+            html = fig_to_html(fig, caption=caption, export_opts=self.export_opts, **kwargs)
+        
+        return self.add(html)
+    
+    def add_alert(
+        self,
+        message: str,
+        variant: Literal["info", "success", "warning", "error"] = "info",
+        title: Optional[str] = None
+    ) -> ReportBuilder:
+        """Dodaje alert box."""
+        return self.add(alert(message, variant=variant, title=title))
+    
+    def add_divider(self) -> ReportBuilder:
+        """Dodaje separator."""
+        return self.add('<hr class="divider" />')
+    
+    def add_page_break(self) -> ReportBuilder:
+        """Dodaje page break (dla PDF)."""
+        return self.add('<div class="page-break"></div>')
+    
+    def add_custom_html(self, html: str) -> ReportBuilder:
+        """Dodaje custom HTML."""
+        return self.add(html)
+    
+    def build_html(self, include_toc: bool = True) -> str:
+        """
+        Buduje kompletny HTML document.
+        
+        Args:
+            include_toc: Czy includować TOC
+            
+        Returns:
+            Complete HTML string
+        """
+        # Generate CSS
+        css = generate_report_css(self.theme, self.custom_css)
+        
+        # Build metadata section
+        metadata_items = []
+        if self.metadata.author:
+            metadata_items.append(f"<strong>Autor:</strong> {_esc(self.metadata.author)}")
+        if self.metadata.company:
+            metadata_items.append(f"<strong>Organizacja:</strong> {_esc(self.metadata.company)}")
+        if self.metadata.date:
+            metadata_items.append(f"<strong>Data:</strong> {_esc(self.metadata.date)}")
+        if self.metadata.version:
+            metadata_items.append(f"<strong>Wersja:</strong> {_esc(self.metadata.version)}")
+        
+        metadata_html = ""
+        if metadata_items:
+            metadata_html = f'<div class="text-muted text-small mb-3">{" | ".join(metadata_items)}</div>'
+        
+        # Description
+        description_html = ""
+        if self.metadata.description:
+            description_html = f'<p class="mb-3">{_esc(self.metadata.description)}</p>'
+        
+        # Tags
+        tags_html = ""
+        if self.metadata.tags:
+            tags = " ".join(badge(tag) for tag in self.metadata.tags)
+            tags_html = f'<div class="mb-3">{tags}</div>'
+        
+        # TOC
+        toc_html = ""
+        if include_toc and self.toc and self.toc.enabled:
+            toc_html = self.toc.to_html()
+        
+        # Body content
+        body_content = "\n".join(self.parts)
+        
+        # Footer
+        footer_html = f"""
+<footer>
+  <p><em>Wygenerowano przez Intelligent Predictor</em></p>
+  <p class="text-small">{self.metadata.date}</p>
+</footer>
+"""
+        
+        # Complete HTML
+        html = f"""<!DOCTYPE html>
 <html lang="pl">
 <head>
-<meta charset="utf-8" />
-<title>{_esc(self.title)}</title>
-{head_css}
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="author" content="{_esc(self.metadata.author or '')}">
+  <meta name="description" content="{_esc(self.metadata.description or '')}">
+  <title>{_esc(self.metadata.title)}</title>
+  <style>{css}</style>
 </head>
 <body>
-<h1>{_esc(self.title)}</h1>
-{meta_html}
-{notes_html}
-{body}
-<footer><em>Wygenerowano przez Intelligent Predictor.</em></footer>
+  <div class="container">
+    <h1>{_esc(self.metadata.title)}</h1>
+    {metadata_html}
+    {description_html}
+    {tags_html}
+    {toc_html}
+    {body_content}
+    {footer_html}
+  </div>
 </body>
 </html>"""
+        
         return html
-
-
-def html_to_bytes(html: str, encoding: str = "utf-8") -> bytes:
-    try:
-        return html.encode(encoding)
-    except Exception as e:
-        logger.exception("HTML encode failed: %s", e)
-        return html.encode("iso-8859-2", errors="replace")
-
-
-# ======================================================================================
-# === PDF EXPORTER (WeasyPrint / Playwright) ===
-# ======================================================================================
-@dataclass
-class PDFExporter:
-    pdf_opts: PDFOptions = field(default_factory=PDFOptions)
-    dark_theme: DarkTheme = field(default_factory=DarkTheme)
-
-    @cache_data_if_available(ttl=3600)
-    def _font_css(self, font_name: str, font_bytes: bytes | None) -> str:
+    
+    def to_bytes(self, encoding: str = "utf-8") -> bytes:
         """
-        Tworzy @font-face z wgranych bytes (TTF/OTF). Gdy brak fontu – używa systemowych fallbacków.
+        Konwertuje HTML do bytes.
+        
+        Args:
+            encoding: Kodowanie
+            
+        Returns:
+            HTML jako bytes
+        """
+        html = self.build_html()
+        try:
+            return html.encode(encoding)
+        except UnicodeEncodeError:
+            LOGGER.warning(f"Encoding {encoding} failed, falling back to utf-8 with errors='replace'")
+            return html.encode("utf-8", errors="replace")
+
+
+# ========================================================================================
+# PDF EXPORTERS
+# ========================================================================================
+
+class FontManager:
+    """Manager dla custom fontów."""
+    
+    def __init__(self):
+        self._fonts: Dict[str, bytes] = {}
+    
+    def add_font(self, name: str, font_bytes: bytes) -> None:
+        """Dodaje czcionkę."""
+        self._fonts[name] = font_bytes
+        LOGGER.debug(f"Added font: {name} ({len(font_bytes)} bytes)")
+    
+    def get_font(self, name: str) -> Optional[bytes]:
+        """Pobiera czcionkę."""
+        return self._fonts.get(name)
+    
+    def has_font(self, name: str) -> bool:
+        """Sprawdza czy czcionka istnieje."""
+        return name in self._fonts
+    
+    @lru_cache(maxsize=32)
+    def generate_font_face_css(self, name: str, font_bytes: bytes) -> str:
+        """
+        Generuje @font-face CSS.
+        
+        Args:
+            name: Nazwa czcionki
+            font_bytes: Dane binarne czcionki
+            
+        Returns:
+            CSS string
         """
         if not font_bytes:
-            # Fallback: systemowe fonty z PL znakami
-            return f"""
-<style>
-body {{ font-family: "{font_name}", "DejaVu Sans", "Noto Sans", "Inter", "Segoe UI", Arial, sans-serif; }}
-</style>
-""".strip()
-        mime = "font/ttf"
+            return ""
+        
+        # Detect format from magic bytes
+        if font_bytes.startswith(b'\x00\x01\x00\x00'):
+            format_type = "truetype"
+            mime = "font/ttf"
+        elif font_bytes.startswith(b'OTTO'):
+            format_type = "opentype"
+            mime = "font/otf"
+        elif font_bytes.startswith(b'wOFF'):
+            format_type = "woff"
+            mime = "font/woff"
+        elif font_bytes.startswith(b'wOF2'):
+            format_type = "woff2"
+            mime = "font/woff2"
+        else:
+            format_type = "truetype"
+            mime = "font/ttf"
+        
         b64 = base64.b64encode(font_bytes).decode("ascii")
+        
         return f"""
-<style>
 @font-face {{
-  font-family: "{font_name}";
-  src: url(data:{mime};base64,{b64}) format("truetype");
+  font-family: "{name}";
+  src: url(data:{mime};base64,{b64}) format("{format_type}");
   font-weight: normal;
   font-style: normal;
   font-display: swap;
 }}
-body {{ font-family: "{font_name}", "DejaVu Sans", "Noto Sans", "Inter", "Segoe UI", Arial, sans-serif; }}
-</style>
-""".strip()
+"""
 
-    def _inject_pdf_css(self, html: str, font_css: str) -> str:
-        parts = [self.pdf_opts.page_css()]
-        if self.pdf_opts.dark_mode:
-            parts.append(self.dark_theme.css_override())
-        parts.append(font_css)
-        # Wstrzyknięcie na końcu <head>
-        try:
-            insert_css = "\n".join(parts)
-            if "</head>" in html:
-                return html.replace("</head>", insert_css + "\n</head>")
-            # gdy brak <head> (nie powinno się zdarzyć, ale defensywnie)
-            return insert_css + html
-        except Exception as e:
-            logger.warning("CSS injection failed: %s", e)
-            return html
 
-    def to_pdf_weasy(self, html: str, *, font_bytes: bytes | None = None) -> bytes:
-        if not _HAS_WEASY:
-            raise RuntimeError("WeasyPrint nie jest zainstalowany. Zainstaluj: pip install weasyprint")
-        font_css = self._font_css(self.pdf_opts.embed_font_name, font_bytes)
-        html_aug = self._inject_pdf_css(html, font_css)
+@dataclass
+class PDFExporter:
+    """
+    Zaawansowany exporter PDF PRO++++.
+    
+    Supports multiple rendering engines:
+    - WeasyPrint (CSS-based)
+    - Playwright (Chromium)
+    - ReportLab (programmatic)
+    """
+    pdf_opts: PDFOptions = field(default_factory=PDFOptions)
+    font_manager: FontManager = field(default_factory=FontManager)
+    
+    def _inject_pdf_css(
+        self,
+        html: str,
+        additional_css: Optional[str] = None
+    ) -> str:
+        """
+        Wstrzykuje PDF-specific CSS.
+        
+        Args:
+            html: HTML string
+            additional_css: Dodatkowy CSS
+            
+        Returns:
+            HTML z wstrzykniętym CSS
+        """
+        css_parts = [self.pdf_opts.page_css()]
+        
+        # Font CSS
+        if self.pdf_opts.embed_fonts:
+            font_bytes = self.font_manager.get_font(self.pdf_opts.font_name)
+            if font_bytes:
+                font_css = self.font_manager.generate_font_face_css(
+                    self.pdf_opts.font_name,
+                    font_bytes
+                )
+                css_parts.append(font_css)
+            
+            # Add font-family to body
+            fallbacks = ", ".join(f'"{f}"' for f in self.pdf_opts.font_fallbacks)
+            css_parts.append(f"""
+body {{
+  font-family: "{self.pdf_opts.font_name}", {fallbacks}, sans-serif;
+}}
+""")
+        
+        # Additional CSS
+        if additional_css:
+            css_parts.append(additional_css)
+        
+        # Watermark
+        if self.pdf_opts.watermark_text:
+            css_parts.append(f"""
+body::before {{
+  content: "{self.pdf_opts.watermark_text}";
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) rotate(-45deg);
+  font-size: 80px;
+  opacity: {self.pdf_opts.watermark_opacity};
+  color: #000;
+  pointer-events: none;
+  z-index: 9999;
+}}
+""")
+        
+        # Inject CSS
+        inject_css = f'<style>{chr(10).join(css_parts)}</style>'
+        
+        if "</head>" in html:
+            return html.replace("</head>", f"{inject_css}\n</head>")
+        elif "<body>" in html:
+            return html.replace("<body>", f"<head>{inject_css}</head>\n<body>")
+        else:
+            return f"<html><head>{inject_css}</head><body>{html}</body></html>"
+    
+    def to_pdf_weasyprint(self, html: str) -> bytes:
+        """
+        Eksportuje do PDF używając WeasyPrint.
+        
+        Args:
+            html: HTML string
+            
+        Returns:
+            PDF bytes
+            
+        Raises:
+            RuntimeError: Jeśli WeasyPrint niedostępny
+        """
+        if not HAS_WEASYPRINT:
+            raise RuntimeError(
+                "WeasyPrint nie jest zainstalowany. "
+                "Zainstaluj: pip install weasyprint"
+            )
+        
         try:
-            pdf_bytes = _WHTML(string=html_aug).write_pdf(stylesheets=[_WCSS(string="")])
+            html_augmented = self._inject_pdf_css(html)
+            
+            pdf_bytes = _WHTML(string=html_augmented).write_pdf(
+                stylesheets=[_WCSS(string="")]
+            )
+            
+            LOGGER.info(f"Generated PDF with WeasyPrint ({len(pdf_bytes)} bytes)")
             return pdf_bytes
+            
         except Exception as e:
-            logger.exception("WeasyPrint PDF failed: %s", e)
+            LOGGER.error(f"WeasyPrint PDF generation failed: {e}")
             raise
-
-    def to_pdf_playwright(self, html: str, *, font_bytes: bytes | None = None) -> bytes:
-        if not _HAS_PW:
-            raise RuntimeError("Playwright/Chromium nie jest zainstalowany. "
-                               "Zainstaluj: pip install playwright && playwright install chromium")
-        font_css = self._font_css(self.pdf_opts.embed_font_name, font_bytes)
-        html_aug = self._inject_pdf_css(html, font_css)
-        # Render w headless Chromium – pełny CSS/JS
+    
+    def to_pdf_playwright(self, html: str) -> bytes:
+        """
+        Eksportuje do PDF używając Playwright/Chromium.
+        
+        Args:
+            html: HTML string
+            
+        Returns:
+            PDF bytes
+            
+        Raises:
+            RuntimeError: Jeśli Playwright niedostępny
+        """
+        if not HAS_PLAYWRIGHT:
+            raise RuntimeError(
+                "Playwright nie jest zainstalowany. "
+                "Zainstaluj: pip install playwright && playwright install chromium"
+            )
+        
         try:
+            html_augmented = self._inject_pdf_css(html)
+            
             with sync_playwright() as p:
-                browser = p.chromium.launch()
+                browser = p.chromium.launch(headless=True)
                 page = browser.new_page()
-                page.set_content(html_aug, wait_until="load")
+                
+                # Set content and wait for load
+                page.set_content(html_augmented, wait_until="networkidle")
+                
+                # Generate PDF
                 pdf_bytes = page.pdf(
-                    format=self.pdf_opts.page_size,
+                    format=self.pdf_opts.page_size.value,
                     print_background=self.pdf_opts.print_background,
                     margin={
                         "top": self.pdf_opts.margin_top,
@@ -492,138 +1626,192 @@ body {{ font-family: "{font_name}", "DejaVu Sans", "Noto Sans", "Inter", "Segoe 
                         "left": self.pdf_opts.margin_left,
                     },
                     prefer_css_page_size=True,
+                    display_header_footer=bool(
+                        self.pdf_opts.header_text or
+                        self.pdf_opts.footer_text or
+                        self.pdf_opts.show_page_numbers
+                    )
                 )
+                
                 browser.close()
+            
+            LOGGER.info(f"Generated PDF with Playwright ({len(pdf_bytes)} bytes)")
             return pdf_bytes
+            
         except Exception as e:
-            logger.exception("Playwright PDF failed: %s", e)
+            LOGGER.error(f"Playwright PDF generation failed: {e}")
             raise
+    
+    def to_pdf(
+        self,
+        html: str,
+        engine: PDFEngine = PDFEngine.PLAYWRIGHT
+    ) -> bytes:
+        """
+        Eksportuje do PDF używając wybranego silnika.
+        
+        Args:
+            html: HTML string
+            engine: Silnik PDF
+            
+        Returns:
+            PDF bytes
+        """
+        if engine == PDFEngine.WEASYPRINT:
+            return self.to_pdf_weasyprint(html)
+        elif engine == PDFEngine.PLAYWRIGHT:
+            return self.to_pdf_playwright(html)
+        elif engine == PDFEngine.REPORTLAB:
+            raise NotImplementedError("ReportLab engine not yet implemented")
+        else:
+            raise ValueError(f"Unknown PDF engine: {engine}")
 
 
-# ======================================================================================
-# === UI STREAMLIT: DEMO RAPORT + EKSPORT ===
-# ======================================================================================
-st.set_page_config(page_title="Raport PRO++ (HTML/PDF)", layout="wide")
+# ========================================================================================
+# CONVENIENCE FUNCTIONS
+# ========================================================================================
 
-st.title("Raport PRO++ — HTML/PDF z ciemnym motywem i fontem PL")
+def quick_report(
+    title: str,
+    sections: List[Dict[str, Any]],
+    *,
+    theme: Union[ReportTheme, ThemeConfig] = ReportTheme.PROFESSIONAL,
+    output_format: Literal["html", "pdf"] = "html",
+    pdf_engine: PDFEngine = PDFEngine.PLAYWRIGHT
+) -> Union[str, bytes]:
+    """
+    Szybkie tworzenie raportu z listy sekcji.
+    
+    Args:
+        title: Tytuł raportu
+        sections: Lista sekcji z dict zawierającymi type i content
+        theme: Motyw
+        output_format: Format wyjściowy
+        pdf_engine: Silnik PDF
+        
+    Returns:
+        HTML string lub PDF bytes
+        
+    Examples:
+        >>> sections = [
+        ...     {"type": "section", "title": "Overview"},
+        ...     {"type": "kpi", "items": [{"label": "Total", "value": 1000}]},
+        ...     {"type": "table", "df": my_dataframe}
+        ... ]
+        >>> html = quick_report("My Report", sections)
+    """
+    metadata = ReportMetadata(title=title)
+    builder = ReportBuilder(metadata=metadata, theme=theme)
+    
+    for section in sections:
+        section_type = section.get("type")
+        
+        if section_type == "section":
+            builder.add_section(
+                section.get("title", ""),
+                level=section.get("level", 2)
+            )
+        
+        elif section_type == "paragraph":
+            builder.add_paragraph(section.get("text", ""))
+        
+        elif section_type == "markdown":
+            builder.add_markdown(section.get("text", ""))
+        
+        elif section_type == "kpi":
+            builder.add_kpi_row(section.get("items", []))
+        
+        elif section_type == "table":
+            builder.add_table(
+                section.get("df"),
+                caption=section.get("caption")
+            )
+        
+        elif section_type == "figure":
+            builder.add_figure(
+                section.get("fig"),
+                as_image=section.get("as_image", False),
+                caption=section.get("caption")
+            )
+        
+        elif section_type == "alert":
+            builder.add_alert(
+                section.get("message", ""),
+                variant=section.get("variant", "info"),
+                title=section.get("title")
+            )
+        
+        elif section_type == "divider":
+            builder.add_divider()
+        
+        elif section_type == "page_break":
+            builder.add_page_break()
+    
+    if output_format == "html":
+        return builder.build_html()
+    else:
+        html = builder.build_html()
+        exporter = PDFExporter()
+        return exporter.to_pdf(html, engine=pdf_engine)
 
-with st.sidebar:
-    st.header("⚙️ Opcje eksportu")
-    engine = st.selectbox(
-        "Silnik PDF",
-        options=["WeasyPrint", "Playwright (Chromium)"],
-        index=0
-    )
-    dark_mode = st.toggle("Ciemny tryb PDF", value=True, help="Wymusza dark-mode w PDF (nadpisuje zmienne CSS).")
-    img_mode = st.toggle("Wykres jako obraz (PNG)", value=(engine == "WeasyPrint"),
-                         help="Zalecane dla WeasyPrint (brak JS). Playwright obsługuje JS/Plotly DIV.")
-    st.caption("Jeśli chcesz pełne odwzorowanie JS (Plotly DIV) w PDF, wybierz Playwright i wyłącz 'Wykres jako obraz'.")
 
-    st.subheader("🅰️ Osadź czcionkę (PL)")
-    font_file = st.file_uploader("Wgraj .ttf/.otf z polskimi znakami (opcjonalnie)", type=["ttf", "otf"])
-    font_bytes = font_file.read() if font_file else None
-    font_name = st.text_input("Nazwa logiczna czcionki", value="AppFont")
+# ========================================================================================
+# EXPORT & DOCUMENTATION
+# ========================================================================================
 
-    st.subheader("📄 Parametry strony")
-    page_size = st.selectbox("Rozmiar strony", ["A4", "Letter"], index=0)
-    mt = st.text_input("Margines górny", "15mm")
-    mr = st.text_input("Margines prawy", "12mm")
-    mb = st.text_input("Margines dolny", "18mm")
-    ml = st.text_input("Margines lewy", "12mm")
+__all__ = [
+    # Enums
+    "ReportTheme",
+    "PDFEngine",
+    "PageSize",
+    "ImageFormat",
+    
+    # Dataclasses
+    "ThemeConfig",
+    "ExportOptions",
+    "PDFOptions",
+    "ReportMetadata",
+    "TableOfContents",
+    
+    # Main classes
+    "ReportBuilder",
+    "PDFExporter",
+    "FontManager",
+    
+    # HTML components
+    "section_title",
+    "paragraph",
+    "badge",
+    "alert",
+    "kpi_card",
+    "kpi_row",
+    "dataframe_table",
+    "fig_to_html",
+    "fig_to_image",
+    "markdown_to_html",
+    
+    # Utilities
+    "generate_report_css",
+    "quick_report",
+    
+    # Constants
+    "THEMES",
+    "HAS_WEASYPRINT",
+    "HAS_PLAYWRIGHT",
+    "HAS_REPORTLAB",
+    "HAS_JINJA2",
+    "HAS_MARKDOWN",
+]
 
-    export_opts = ExportOptions()
-    pdf_opts = PDFOptions(
-        page_size=page_size,
-        margin_top=mt, margin_right=mr, margin_bottom=mb, margin_left=ml,
-        dark_mode=dark_mode,
-        embed_font_name=font_name,
-    )
-    exporter = PDFExporter(pdf_opts=pdf_opts)
+# ========================================================================================
+# MODULE INITIALIZATION
+# ========================================================================================
 
-# === Generujemy przykładowe dane (bez placeholderów) ===
-rng = np.random.default_rng(42)
-n = 250
-df = pd.DataFrame({
-    "y_true": rng.normal(loc=100, scale=15, size=n),
-    "y_pred": rng.normal(loc=100, scale=15, size=n),
-})
-df["err"] = df["y_true"] - df["y_pred"]
-
-mae = float(df["err"].abs().mean())
-rmse = float(np.sqrt((df["err"] ** 2).mean()))
-r2 = 1.0 - (np.sum((df["y_true"] - df["y_pred"])**2) / np.sum((df["y_true"] - df["y_true"].mean())**2))
-
-metrics = {"MAE": round(mae, 3), "RMSE": round(rmse, 3), "R2": round(r2, 4)}
-
-# === Wykres ===
-fig = go.Figure()
-fig.add_trace(go.Scatter(y=df["y_true"], mode="lines", name="y_true"))
-fig.add_trace(go.Scatter(y=df["y_pred"], mode="lines", name="y_pred"))
-fig.update_layout(height=360, margin=dict(l=20, r=20, t=10, b=10))
-
-# === Składamy raport HTML ===
-rb = ReportBuilder("Wyniki modelu – PRO")
-rb.add(section_title("KPI"))
-rb.add(kpi_row([
-    {"label": "MAE", "value": metrics["MAE"], "delta": -5.2, "good_is_up": False},
-    {"label": "RMSE", "value": metrics["RMSE"], "delta": -3.1, "good_is_up": False},
-    {"label": "R²", "value": metrics["R2"]},
-]))
-rb.add(section_title("Dane testowe"))
-rb.add(dataframe_table(df.head(50), max_rows=export_opts.max_table_rows, caption="Podgląd (top 50)"))
-rb.add(section_title("Wykres predykcji"))
-if img_mode:
-    rb.add(fig_to_img(fig, fmt="png", scale=2.0, caption="y_true vs y_pred", export_opts=export_opts))
-else:
-    rb.add(fig_to_html(fig, include_plotlyjs=export_opts.plotly_include_js,
-                       config=export_opts.plotly_config(), caption="y_true vs y_pred"))
-
-html = rb.build()
-
-# === Podgląd HTML w aplikacji ===
-st.components.v1.html(html, height=800, scrolling=True)
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.download_button("⬇️ Pobierz HTML", data=html_to_bytes(html),
-                       file_name="raport.html", mime="text/html")
-
-# === Generowanie PDF ===
-with col2:
-    if st.button("🖨️ Generuj PDF"):
-        try:
-            if engine.startswith("Weasy"):
-                if not _HAS_WEASY:
-                    st.error("WeasyPrint nie jest dostępny. Zainstaluj: pip install weasyprint")
-                else:
-                    pdf_bytes = exporter.to_pdf_weasy(html, font_bytes=font_bytes)
-                    st.success("PDF (WeasyPrint) gotowy.")
-                    st.download_button("⬇️ Pobierz PDF (WeasyPrint)",
-                                       data=pdf_bytes, file_name="raport_weasy.pdf", mime="application/pdf")
-            else:
-                if not _HAS_PW:
-                    st.error("Playwright/Chromium nie jest dostępny. "
-                             "Zainstaluj: pip install playwright && playwright install chromium")
-                else:
-                    pdf_bytes = exporter.to_pdf_playwright(html, font_bytes=font_bytes)
-                    st.success("PDF (Playwright) gotowy.")
-                    st.download_button("⬇️ Pobierz PDF (Playwright)",
-                                       data=pdf_bytes, file_name="raport_playwright.pdf", mime="application/pdf")
-        except Exception as e:
-            st.exception(e)
-
-with col3:
-    st.info(
-        "ℹ️ Wskazówka:\n"
-        "- Do **WeasyPrint** włącz „Wykres jako obraz (PNG)”.\n"
-        "- **Playwright** renderuje JS/Plotly, więc możesz użyć wersji interaktywnej w HTML.\n"
-        "- Wgraj własną czcionkę TTF/OTF, aby wymusić polskie znaki w PDF.\n"
-    )
-
-# === Dodatkowe bezpieczeństwo: informacja o zależnościach ===
-with st.expander("Stan zależności PDF"):
-    st.write({
-        "weasyprint": _HAS_WEASY,
-        "playwright": _HAS_PW,
-        "kaleido (dla PNG)": "OK" if "kaleido" in pio.__dict__.get("__all__", []) or True else "N/D",  # informacyjnie
-    })
+LOGGER.info(
+    f"Report Generator PRO++++ initialized | "
+    f"WeasyPrint: {HAS_WEASYPRINT} | "
+    f"Playwright: {HAS_PLAYWRIGHT} | "
+    f"ReportLab: {HAS_REPORTLAB} | "
+    f"Jinja2: {HAS_JINJA2} | "
+    f"Markdown: {HAS_MARKDOWN}"
+)

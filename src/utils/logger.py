@@ -390,28 +390,58 @@ def silence_loggers(
 _CONFIGURED = False
 
 
-def configure_logger(force: bool = False) -> Any:
+def _norm_level(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    v = str(value).strip().upper()
+    return v if v in _VALID_LEVELS else None
+
+def configure_logger(
+    *,
+    force: bool = False,
+    level: Optional[str] = None,
+    console_level: Optional[str] = None,
+    file_level: Optional[str] = None,
+) -> Any:
     """
-    Konfiguruje system logowania.
+    Konfiguruje system logowania (loguru) z opcjonalnym nadpisaniem poziomów.
     
     Args:
-        force: Czy wymusić rekonfigurację
-        
+        force:     Wymuś rekonfigurację nawet jeśli już skonfigurowano.
+        level:     Globalne nadpisanie poziomu (konsola+plik+patch stdlib).
+        console_level: Nadpisanie tylko poziomu konsoli.
+        file_level:    Nadpisanie tylko poziomu pliku/JSON.
+    
     Returns:
-        Loguru logger instance
+        loguru.logger
     """
     global _CONFIGURED
-    
+
     if _CONFIGURED and not force:
         return _loguru_logger
-    
-    # Load config
+
+    # 1) Bazowa konfiguracja z plików/env
     config = _merge_configs()
-    
-    # Remove existing handlers
+
+    # 2) Normalizacja i nadpisania z parametrów
+    lvl_all   = _norm_level(level)
+    lvl_cons  = _norm_level(console_level)
+    lvl_file  = _norm_level(file_level)
+
+    if lvl_all:
+        # Jednym parametrem ustawiamy spójnie wszystko
+        config["level"] = lvl_all
+        config["console_level"] = lvl_all
+        config["file_level"] = lvl_all
+
+    if lvl_cons:
+        config["console_level"] = lvl_cons
+    if lvl_file:
+        config["file_level"] = lvl_file
+
+    # 3) (Re)inicjalizacja handlerów
     _loguru_logger.remove()
-    
-    # Console handler
+
     _loguru_logger.add(
         sys.stderr,
         level=config["console_level"],
@@ -420,10 +450,9 @@ def configure_logger(force: bool = False) -> Any:
         backtrace=config["backtrace"],
         diagnose=config["diagnose"],
         enqueue=config["enqueue"],
-        catch=True
+        catch=True,
     )
-    
-    # File handler
+
     log_file = LOG_DIR / config["log_filename"]
     _loguru_logger.add(
         log_file,
@@ -435,11 +464,10 @@ def configure_logger(force: bool = False) -> Any:
         backtrace=False,
         diagnose=False,
         enqueue=config["enqueue"],
-        catch=True
+        catch=True,
     )
-    
-    # JSON handler (structured logging)
-    if config["serialize_json"]:
+
+    if config.get("serialize_json", False):
         json_file = LOG_DIR / config["json_filename"]
         _loguru_logger.add(
             json_file,
@@ -451,10 +479,9 @@ def configure_logger(force: bool = False) -> Any:
             backtrace=False,
             diagnose=False,
             enqueue=config["enqueue"],
-            catch=True
+            catch=True,
         )
-    
-    # Memory sink handler
+
     _loguru_logger.add(
         _MEMORY_SINK.write,
         level=config["console_level"],
@@ -462,20 +489,17 @@ def configure_logger(force: bool = False) -> Any:
         backtrace=False,
         diagnose=False,
         enqueue=False,
-        catch=True
+        catch=True,
     )
-    
-    # Patch stdlib logging
+
+    # 4) Patch stdlib logging (użyj globalnego pola 'level' po nadpisaniach)
     patch_stdlib_logging(config["level"])
-    
-    # Silence noisy loggers
+
+    # 5) Wyciszenia i kontekst
     silence_loggers(NOISY_LOGGERS, level="WARNING")
-    
-    # Bind app context
     _loguru_logger.configure(extra={"mod": config["app_name"]})
-    
+
     _CONFIGURED = True
-    
     return _loguru_logger
 
 

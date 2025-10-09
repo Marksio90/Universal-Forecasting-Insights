@@ -1132,7 +1132,7 @@ def render_footer():
     st.markdown("""
     <div class="footer">
         <p style="font-size: 1.1rem; margin-bottom: 0.5rem;">
-            © 2024 Intelligent Predictor PRO
+            © 2025 Intelligent Predictor PRO
         </p>
         <p style="color: #94a3b8; margin-bottom: 1rem;">
             Zbudowano z ❤️ używając Python & Streamlit

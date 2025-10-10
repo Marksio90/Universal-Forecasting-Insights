@@ -1,0 +1,5 @@
+import streamlit as st
+def kpi_row(items: dict):
+    cols=st.columns(len(items))
+    for (k,v),c in zip(items.items(), cols):
+        with c: st.metric(k,v)

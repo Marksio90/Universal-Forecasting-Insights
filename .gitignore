@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.streamlit/secrets.toml
+logs/
+models/*.joblib
+reports/*
+mlruns/
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.DS_Store
+Thumbs.db

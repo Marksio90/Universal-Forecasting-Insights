@@ -1,0 +1,13 @@
+:root{
+  --bg: #0b0f19;
+  --card: #121826;
+  --muted: #8b95a7;
+  --accent: #6C5CE7;
+  --radius: 14px;
+}
+/* Global polish */
+.main .block-container{padding-top:1.2rem; max-width:1200px;}
+.stButton>button{border-radius:var(--radius); padding:.7rem 1.1rem; font-weight:600}
+.kpi-card{border-radius:var(--radius); padding:1rem; border:1px solid rgba(108,92,231,.25)}
+.section{padding:1rem 1.2rem; border-radius:var(--radius); border:1px solid rgba(255,255,255,.08); margin-bottom:1rem}
+.small{font-size:.9rem; color:var(--muted)}

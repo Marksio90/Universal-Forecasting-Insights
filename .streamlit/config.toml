@@ -1,0 +1,7 @@
+[theme]
+base="dark"
+primaryColor="#6C5CE7"         # --accent
+backgroundColor="#0b0f19"      # --bg
+secondaryBackgroundColor="#121826"  # --card
+textColor="#FFFFFF"
+font="sans serif"

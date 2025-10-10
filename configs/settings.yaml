@@ -1,13 +1,80 @@
+# configs/settings.yaml — PRO+++ (rozszerzony, wstecznie kompatybilny)
+
 app:
   title: "DataGenius PRO – Senior DS Copilot"
-  theme: "auto" # auto|light|dark
+  theme: "auto"        # auto|light|dark
   max_file_size_mb: 200
   sample_rows_for_eda: 50000
+  locale: "pl_PL"      # formatowanie liczb/daty w UI
+  date_display_fmt: "YYYY-MM-DD HH:mm"
+  ui:
+    sidebar_compact: true
+    wide_layout: true
+    primary_color: "#6C5CE7"
+
+paths:
+  data_dir: "data"
+  models_dir: "models"
+  reports_dir: "reports"
+  artifacts_dir: "artifacts"
+
 ml:
   test_size: 0.2
   random_state: 42
   n_jobs: -1
+  cv_folds: 5
+  scoring_cls: "f1_weighted"  # metryka główna klasyfikacji
+  scoring_reg: "r2"           # metryka główna regresji
+  threshold_metric: "f1"      # optymalizacja progu: f1|accuracy|youden
+  calibrate_proba: true       # kalibracja prawdopodobieństw (binarka)
+  use_smote: true             # oversampling w CV dla klas nierównych
+  automl:
+    trials: 30                # Optuna – liczba prób
+    top_k_blend: 3            # ile modeli w ensemblu
+    allow_xgboost: true
+    allow_lightgbm: true
+    allow_catboost: true
+  forecast:
+    periods: 60               # horyzont prognozy (dni, jeśli freq=D)
+    holidays_country: "PL"    # święta dla Propheta
+    tune_changepoint: true    # lekkie strojenie CPS w CV
+
+openai:
+  enabled: true               # jeśli brak klucza w ENV, moduł przejdzie w tryb offline
+  model: "gpt-4o-mini"
+  temperature: 0.2
+  max_tokens: 600
+  use_responses_api: true     # preferuj Responses API (fallback do Chat Completions)
+
 report:
   author: "DataGenius Team"
   company: "Your Company"
   logo_path: "assets/images/logo.svg"
+  theme: "dark"               # styl raportu PDF/HTML: light|dark
+  include_corr: true          # macierz korelacji w EDA-raporcie
+  max_hist_cols: 6            # maks. liczba histogramów
+  output_dir: "reports"       # folder wyjściowy raportów
+
+monitoring:
+  drift:
+    enabled: true
+    schedule_minutes: 60      # co ile minut job driftu
+    psi_threshold: 0.25
+    ref_path: "reports/tmp_train.csv"
+    curr_path: "reports/tmp_curr.csv"
+  alerts:
+    slack_webhook_env: "SLACK_WEBHOOK_URL"   # nazwa zmiennej ENV
+    email_to: "ops@example.com"              # adres do alarmów
+
+logging:
+  level: "INFO"               # DEBUG|INFO|WARNING|ERROR
+  json: false                 # log w formacie JSON
+  file: "logs/app.log"        # pusta wartość = tylko stdout
+
+security:
+  allow_file_types: ["csv","tsv","parquet","feather","xlsx","json","jsonl"]
+  max_preview_rows: 2000      # limit podglądu w UI
+
+cache:
+  enabled: true
+  ttl_minutes: 120            # czas życia cache’u danych/EDA w minutach

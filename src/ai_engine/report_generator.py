@@ -116,7 +116,7 @@ def _register_custom_filters(env: Environment) -> None:
     # Text formatting
     env.filters["nl2br"] = lambda s: str(s or "").replace("\n", "<br/>")
     env.filters["truncate_chars"] = lambda s, n=400: (
-        s if len(str(s)) <= n else str(s)[:n - 1] + "…"
+        s if len(str(s)) <= n else str(s)[:n - 1] + ""
     )
     
     # Number formatting
@@ -402,7 +402,7 @@ def _truncate_context_for_fallback(context: dict[str, Any]) -> dict[str, Any]:
         try:
             json_str = json.dumps(value, ensure_ascii=False)
             if len(json_str) > 1000:  # Truncate large values
-                truncated[key] = f"<truncated: {len(json_str)} chars>"
+                truncated[key] = "<truncated: {len(json_str)} chars>"
             else:
                 truncated[key] = value
         except Exception:
@@ -652,12 +652,12 @@ def _render_missing_template_fallback(
     
     candidates = _get_candidate_template_dirs(None)
     candidates_html = "\n".join([
-        f"<li><code>{_escape_html(str(p))}</code> "
-        f"{'✅' if p.exists() else '❌'}</li>"
+        "<li><code>{_escape_html(str(p))}</code> "
+        "{'✅' if p.exists() else '❌'}</li>"
         for p in candidates
     ])
     
-    return f"""<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="utf-8">
@@ -743,7 +743,7 @@ def _render_template_syntax_error_fallback(
     context: dict[str, Any]
 ) -> str:
     """Render fallback HTML for template syntax errors."""
-    return f"""<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="utf-8">
@@ -795,7 +795,7 @@ def _render_template_syntax_error_fallback(
         
         <h2>💡 Common Issues</h2>
         <ul>
-            <li>Unclosed tags: <code>{% if ... %}</code> without <code>{% endif %}</code></li>
+            <li>Unclosed tags: <code>{% if %}</code> without <code>{% endif %}</code></li>
             <li>Invalid variable syntax: check {{ }} and {% %}</li>
             <li>Missing filters or undefined variables</li>
         </ul>
@@ -817,7 +817,7 @@ def _render_exception_fallback(
     normalized = _normalize_context(context)
     truncated = _truncate_context_for_fallback(normalized)
     
-    return f"""<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="pl">
 <head>
     <meta charset="utf-8">
@@ -930,7 +930,7 @@ def _safe_json(obj: Any) -> str:
         return json.dumps(obj, ensure_ascii=False, indent=2)
     except TypeError as e:
         LOGGER.warning(f"JSON serialization failed: {e}")
-        return f"<non-serializable: {type(obj).__name__}>"
+        return "<non-serializable: {type(obj).__name__}>"
     except Exception as e:
         LOGGER.error(f"Unexpected JSON error: {e}")
         return str(obj)

@@ -257,3 +257,19 @@ Zakres: testy AI integracji, przetwarzania danych i modeli ML (`tests/test_*.py`
 ## 📄 Licencja
 
 Dodaj plik `LICENSE` (np. **MIT**). Jeżeli repozytorium jest prywatne – doprecyzuj zasady użycia wewnętrznego.
+
+---
+## Troubleshooting (Windows / PDF / Prophet / Playwright)
+
+**Prophet / cmdstanpy**
+1. `pip install cmdstanpy`
+2. `python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"`
+3. Dodaj `~/.cmdstan/` do PATH, zrestartuj terminal.
+
+**WeasyPrint (PDF z polskimi znakami)**
+- Windows: zainstaluj zależności GTK/cairo.
+- Użyj fontu obsługującego PL (np. DejaVu Sans) w CSS.
+
+**Playwright**
+- `pip install playwright` + `playwright install`.
+
